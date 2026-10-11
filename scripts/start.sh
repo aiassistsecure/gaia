@@ -41,6 +41,19 @@ alive() {
   ps -p "$pid" -o command= 2>/dev/null | grep -q hearth
 }
 
+# Git Bash PID values do not reliably identify native Windows processes.
+is_windows_git_bash() {
+  case "$(uname -s)" in MINGW*|MSYS*) return 0 ;; *) return 1 ;; esac
+}
+windows_lifecycle() {
+  local action="$1" bin script
+  bin="$(command -v "$HEARTH_BIN")" || die "hearth executable not found"
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/windows-lifecycle.ps1"
+  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
+    "$(cygpath -w "$script")" -Action "$action" -Port "$PORT" \
+    -HearthBinary "$(cygpath -w "$bin")"
+}
+
 write_template() {
   mkdir -p "$HEARTH_HOME"
   cat > "$CONF" <<'EOF'
@@ -137,7 +150,11 @@ cmd_up() {
   read_conf
   mkdir -p "$LOGDIR"
 
-  if alive "$(cat "$KEEPER_PIDFILE" 2>/dev/null)"; then
+  if is_windows_git_bash && windows_lifecycle exists >/dev/null 2>&1; then
+    say "already running on Windows — use status"
+    exit 0
+  fi
+  if ! is_windows_git_bash && alive "$(cat "$KEEPER_PIDFILE" 2>/dev/null)"; then
     say "already running (keeper pid $(cat "$KEEPER_PIDFILE")) — '$0 status' to look"
     exit 0
   fi
@@ -184,6 +201,11 @@ cmd_up() {
   echo $! > "$KEEPER_PIDFILE"
 
   sleep 2
+  if is_windows_git_bash; then
+    windows_lifecycle status
+    say "verify readiness: curl http://127.0.0.1:$PORT/residency"
+    return 0
+  fi
   if alive "$(cat "$PIDFILE" 2>/dev/null)"; then
     say "up — gateway on http://127.0.0.1:$PORT (pid $(cat "$PIDFILE"), keeper $(cat "$KEEPER_PIDFILE"))"
     say "logs: $GATEWAY_LOG   ·   '$0 status' for the fleet   ·   '$0 down' to stop"
@@ -195,6 +217,12 @@ cmd_up() {
 }
 
 cmd_status() {
+  if is_windows_git_bash; then
+    read_conf
+    windows_lifecycle status
+    "$HEARTH_BIN" status 2>/dev/null || true
+    return
+  fi
   local keeper gw
   keeper="$(cat "$KEEPER_PIDFILE" 2>/dev/null)"; gw="$(cat "$PIDFILE" 2>/dev/null)"
   if alive "$gw"; then
@@ -211,6 +239,12 @@ cmd_status() {
 cmd_logs() { exec tail -f "$GATEWAY_LOG"; }
 
 cmd_down() {
+  if is_windows_git_bash; then
+    read_conf
+    windows_lifecycle down || die "Windows shutdown failed"
+    rm -f "$PIDFILE" "$KEEPER_PIDFILE"
+    return
+  fi
   local keeper gw stopped=""
   keeper="$(cat "$KEEPER_PIDFILE" 2>/dev/null)"; gw="$(cat "$PIDFILE" 2>/dev/null)"
   # Keeper first, or it resurrects the gateway we are about to stop.
