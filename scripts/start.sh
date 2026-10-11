@@ -48,7 +48,7 @@ is_windows_git_bash() {
 windows_lifecycle() {
   local action="$1" bin script
   bin="$(command -v "$HEARTH_BIN")" || die "hearth executable not found"
-  script="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)/windows-lifecycle.ps1"
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/windows-lifecycle.ps1"
   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
     "$(cygpath -w "$script")" -Action "$action" -Port "$PORT" \
     -HearthBinary "$(cygpath -w "$bin")"
