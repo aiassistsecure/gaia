@@ -118,6 +118,9 @@ read_conf() {
   CTX="${HEARTH_CTX:-}"; MAX_INFLIGHT="${HEARTH_MAX_INFLIGHT:-}"
   EXTRA=()
   while IFS= read -r line; do
+    # Strip a trailing CR so CRLF-edited fleet.conf files do not poison the
+    # last token of each line (e.g. a template path ending in ".jinja\r").
+    line="${line%$'\r'}"
     line="${line%%#*}"
     [ -z "${line// /}" ] && continue
     set -- $line

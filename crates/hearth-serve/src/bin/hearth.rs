@@ -1553,6 +1553,12 @@ fn cmd_up(args: &[String]) -> Result<(), String> {
                 eprintln!("hearth: {n} transition(s) recorded");
                 eprint!("{}", s.report());
             }
+            // Self-healing: bring back children that died unexpectedly.
+            // Evicted and GpuDetached are not restarted (deliberate/external).
+            let r = s.restart_lost();
+            if r > 0 {
+                eprintln!("hearth: restarted {r} child(ren)");
+            }
         }
     });
 

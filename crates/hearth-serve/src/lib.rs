@@ -229,6 +229,68 @@ impl Supervisor {
         transitions
     }
 
+    /// Restart children that died unexpectedly. Only restarts `Lost` with
+    /// `ProcessExited` or `Unhealthy` reasons — not `Evicted` (a deliberate
+    /// VRAM decision) or `GpuDetached` (a host problem we cannot fix).
+    ///
+    /// A child that dies within 60s of starting is not restarted: that is a
+    /// broken configuration (bad binary, bad args), not a transient failure,
+    /// and hot-looping it would thrash the GPU. The 60s threshold is generous
+    /// — even the 30B Q4_K_M loads in ~20s.
+    ///
+    /// Returns the number of children restarted.
+    pub fn restart_lost(&mut self) -> usize {
+        let now = now_ms();
+        let to_restart: Vec<String> = self
+            .managed
+            .iter()
+            .filter(|(model, m)| {
+                let restartable = matches!(
+                    self.fleet.slot(model).map(|s| &s.state),
+                    Some(Residency::Lost {
+                        reason: LostReason::ProcessExited,
+                        ..
+                    }) | Some(Residency::Lost {
+                        reason: LostReason::Unhealthy,
+                        ..
+                    })
+                );
+                // Child must be gone (taken by tick) and old enough to have
+                // been a real run, not a crash-loop on bad config.
+                restartable && m.child.is_none() && now.saturating_sub(m.started_at) > 60_000
+            })
+            .map(|(model, _)| model.clone())
+            .collect();
+
+        let mut restarted = 0;
+        for model in to_restart {
+            // Confirm it still fits — next_to_load is the authority on what
+            // should be running, and it refuses to evict to make room.
+            let should_start = self
+                .fleet
+                .next_to_load()
+                .map(|s| s.declared.model == model)
+                .unwrap_or(false);
+            if !should_start {
+                continue;
+            }
+            let spec = match self.managed.get(&model) {
+                Some(m) => m.spec.clone(),
+                None => continue,
+            };
+            match self.start(spec) {
+                Ok(()) => {
+                    eprintln!("hearth: restarted {model} after unexpected death");
+                    restarted += 1;
+                }
+                Err(e) => {
+                    eprintln!("hearth: failed to restart {model}: {e}");
+                }
+            }
+        }
+        restarted
+    }
+
     /// Block until `model` is ready or the deadline passes. Ticks while it
     /// waits, so every intermediate transition still lands in the spine.
     pub fn wait_ready(&mut self, model: &str, deadline: Duration) -> Result<String, String> {
