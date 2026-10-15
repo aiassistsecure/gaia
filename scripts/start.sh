@@ -189,13 +189,6 @@ cmd_up() {
       wait "$child"; code=$?
       rm -f "$PIDFILE"
       trap - TERM INT
-      # Exit 3 is hearth refusing a misconfigured launch (e.g. unrecognized
-      # flags on its side of `--`, 2026-10-15) — restarting it would hot-loop
-      # the same refusal, so it is clean like a signal exit.
-      if [ "$code" -eq 3 ]; then
-        echo "hearth: refused a misconfigured launch (exit 3) — not restarting; fix the flags and run '$0 up' again" >> "$LOG"
-        exit 0
-      fi
       if [ "$code" -eq 0 ] || [ "$code" -eq 143 ] || [ "$code" -eq 130 ]; then
         echo "hearth: exited cleanly ($code) — not restarting" >> "$LOG"
         exit 0

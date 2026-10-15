@@ -1265,29 +1265,6 @@ fn cmd_up(args: &[String]) -> Result<(), String> {
     // Found by `ps -ww -eo args | grep llama-server` on a production box whose
     // fleet.conf said `extra --jinja` and whose children had no `--jinja`.
     let (args, passthrough) = split_passthrough(args);
-    // HOT PATCH 2026-10-15: refuse to start with unrecognized flags on
-    // hearth's side of `--` instead of silently dropping them. The 2026-09-05
-    // `--` fix closed the mechanism, but a stale launcher (old start.sh, old
-    // binary, manual invocation) still appends runtime knobs like `--jinja`
-    // on hearth's side — and hearth read its known flags and dropped the rest
-    // on the floor. A fleet that starts without its declared knobs is a lie,
-    // so this is fatal, not a warning. Exit code 3 tells start.sh's keeper
-    // "misconfigured, do not restart-loop me".
-    let unknown = find_unknown_up_flags(args);
-    if !unknown.is_empty() {
-        eprintln!(
-            "hearth up: refusing to start — unrecognized flags on hearth's side of the `--` separator:\n  {}\n\
-             If these are llama-server knobs (e.g. from fleet.conf `extra`), they go after a bare `--`:\n  \
-             hearth up --model NAME=... -- {}\n\
-             (./scripts/start.sh passes them through when it is current — `git pull` the hearth repo.)\n\
-             If you meant a hearth flag, check the spelling.",
-            unknown.join(" "),
-            unknown.join(" ")
-        );
-        // process::exit skips destructors; safe here because nothing has been
-        // acquired yet — this runs before any model, port, or spine is touched.
-        std::process::exit(3);
-    }
     let specs = collect_models(args)?;
     if specs.is_empty() {
         return Err(
@@ -1701,51 +1678,6 @@ struct ModelSpec {
     ctx: Option<u32>,
 }
 
-/// Every flag `hearth up` understands on its own side of the `--` separator,
-/// and whether it consumes the following token as a value. Mirrors `flag()` /
-/// `tunable()` (exact match; the next token IS the value, even `-1`) and
-/// `flag_all()` / `flag_eq()` (which also accept `--flag=value`) for the
-/// preload pair.
-fn up_flag_takes_value(arg: &str) -> Option<bool> {
-    if let Some((name, _)) = arg.split_once('=') {
-        // Only the preload pair accepts the `--flag=value` spelling.
-        if name == "--preload-model" || name == "--preload-models" {
-            return Some(false);
-        }
-    }
-    match arg {
-        "--model" | "--port" | "--total-gib" | "--ctx" | "--parallel" | "--gpu-layers"
-        | "--binary" | "--max-inflight" | "--preload-model" | "--preload-models" => Some(true),
-        "--mlock" => Some(false),
-        _ => None,
-    }
-}
-
-/// Tokens on hearth's side of `--` that are not hearth flags. Pure, so the
-/// refusal in `cmd_up` is testable without a fleet.
-fn find_unknown_up_flags(args: &[String]) -> Vec<String> {
-    let mut unknown = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        match up_flag_takes_value(a.as_str()) {
-            Some(takes_value) => {
-                i += 1;
-                if takes_value && i < args.len() {
-                    i += 1; // the value, whatever it looks like
-                }
-            }
-            None => {
-                if a.starts_with('-') && a.as_str() != "-" {
-                    unknown.push(a.clone());
-                }
-                i += 1;
-            }
-        }
-    }
-    unknown
-}
-
 /// Split argv at the first bare `--`: hearth's own flags on the left, the
 /// runtime's on the right. Pure so the contract can be asserted without a
 /// fleet. A missing `--` means no passthrough — never a guess about which
@@ -2121,75 +2053,6 @@ mod passthrough_tests {
         let (own, rt) = split_passthrough(&args);
         assert!(own.is_empty());
         assert_eq!(rt, &v(&["-c", "--", "x"])[..]);
-    }
-}
-
-#[cfg(test)]
-mod unknown_flag_tests {
-    use super::find_unknown_up_flags;
-
-    fn v(s: &[&str]) -> Vec<String> {
-        s.iter().map(|x| x.to_string()).collect()
-    }
-
-    #[test]
-    fn known_flags_and_their_values_are_not_unknown() {
-        let args = v(&[
-            "--model",
-            "muse-glimmer-q4=C:/Users/presi/coderunner/glimmer/Muse-Glimmer-30B-Q4_K_M.gguf:5@8192",
-            "--port",
-            "11434",
-            "--total-gib",
-            "32",
-            "--ctx",
-            "8192",
-            "--parallel",
-            "1",
-            "--gpu-layers",
-            "-1",
-            "--binary",
-            "C:/y/llama-server.exe",
-            "--max-inflight",
-            "64",
-            "--preload-models",
-            "2",
-            "--preload-model",
-            "m",
-            "--preload-model=n",
-            "--mlock",
-        ]);
-        assert!(find_unknown_up_flags(&args).is_empty());
-    }
-
-    #[test]
-    fn misplaced_runtime_flags_are_caught() {
-        // The fleet.conf `extra` failure mode, 2026-10-15: runtime knobs on
-        // hearth's side of `--` must refuse, never silently drop.
-        let args = v(&[
-            "--model",
-            "muse-glimmer-q4=C:/glimmer/Muse-Glimmer-30B-Q4_K_M.gguf:5@8192",
-            "--jinja",
-            "--chat-template",
-            "C:/glimmer/chat_template.jinja",
-        ]);
-        assert_eq!(
-            find_unknown_up_flags(&args),
-            v(&["--jinja", "--chat-template"])
-        );
-    }
-
-    #[test]
-    fn typo_of_a_hearth_flag_is_caught() {
-        let args = v(&["--model", "m=/m.gguf:20", "--prot", "11434"]);
-        assert_eq!(find_unknown_up_flags(&args), v(&["--prot"]));
-    }
-
-    #[test]
-    fn equals_spelling_of_an_unsupported_flag_is_caught() {
-        // flag()/tunable() take `--flag value`, not `--flag=value` — except
-        // the preload pair. A silently ignored `--port=1234` is the same bug.
-        let args = v(&["--model", "m=/m.gguf:20", "--port=1234"]);
-        assert_eq!(find_unknown_up_flags(&args), v(&["--port=1234"]));
     }
 }
 
