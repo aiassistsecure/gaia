@@ -108,7 +108,7 @@ ctx 16384
 #   --metrics          prometheus /metrics per child
 # extra -ub 2048 --cache-reuse 256 -fa on --metrics
 EOF
-  say "wrote a template to $CONF — fill in your models and run '$0 up' again"
+  say "wrote a template to $CONF — fill in your models and run scripts/start.sh up again"
 }
 
 read_conf() {
