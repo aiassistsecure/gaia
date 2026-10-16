@@ -4,7 +4,7 @@
 //!                [--vram-gib N] [--ctx N] [--binary PATH] [--total-gib N] [--once]
 //!   hearth up --model NAME=[gguf:|safetensors:]PATH[:GIB][@CTX] [--model …]
 //!   hearth run MODEL [--port N]
-//!   hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE]
+//!   hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE] [--threads N]
 //!   hearth status
 //!   hearth why MODEL
 //!   hearth as-of MODEL SEQ
@@ -646,7 +646,7 @@ fn managed_quantizer() -> Option<std::path::PathBuf> {
     find_file(&dir, name, 4)
 }
 
-/// `hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE]`
+/// `hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE] [--threads N]`
 ///
 /// INPUT may be a local Transformers directory or one of its .safetensors
 /// files. File input is normalized to its parent because conversion also needs
@@ -655,11 +655,12 @@ fn managed_quantizer() -> Option<std::path::PathBuf> {
 /// `--outtype` controls direct conversion (auto/f32/f16/bf16/q8_0/tq1_0/tq2_0).
 /// `--quant` adds a second llama-quantize stage and accepts the quantizer's
 /// native names, e.g. Q8_0, Q6_K, Q5_K_M, Q4_K_M.
+/// `--threads` controls the llama-quantize stage, defaulting to all available logical CPUs.
 fn cmd_convert(args: &[String]) -> Result<(), String> {
     let input = args
         .first()
         .filter(|s| !s.starts_with("--"))
-        .ok_or("usage: hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE]")?;
+        .ok_or("usage: hearth convert INPUT [--output FILE] [--outtype TYPE] [--quant TYPE] [--threads N]")?;
     let input_path = std::path::PathBuf::from(input);
     if !input_path.exists() {
         return Err(format!("input does not exist: {}", input_path.display()));
@@ -713,6 +714,14 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
         return Err(format!("unsupported --outtype {requested_outtype:?}"));
     }
 
+    let threads = match flag(args, "--threads") {
+        Some(raw) => {
+            let n = raw.parse::<usize>().map_err(|_| format!("invalid --threads {raw:?}: expected a positive integer"))?;
+            if n == 0 { return Err("--threads must be greater than zero".into()); }
+            n
+        }
+        None => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+    };
     let quant = flag(args, "--quant").map(|q| q.to_ascii_uppercase());
     if quant.is_some() && matches!(requested_outtype.as_str(), "q8_0" | "tq1_0" | "tq2_0") {
         return Err(
@@ -789,10 +798,12 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
             base_output.display(),
             output.display()
         );
+        eprintln!("hearth: quantizer threads: {threads}");
         let status = std::process::Command::new(&quantizer)
             .arg(&base_output)
             .arg(&output)
             .arg(&quant)
+            .arg(threads.to_string())
             .status()
             .map_err(|e| format!("could not launch {}: {e}", quantizer.display()))?;
         if !status.success() {
