@@ -2,6 +2,7 @@ target/
 Cargo.lock.bak
 *.pyc
 __pycache__/
+*.so
 node_modules/
 dist/
 *.node

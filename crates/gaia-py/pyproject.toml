@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gaia-engine"
+version = "0.4.7"
+description = "Read the runtime's memory from Python — read-only spine access: seq, latest, why, state_as_of, mirror events_since."
+readme = "README.md"
+license = { text = "BUSL-1.1" }
+requires-python = ">=3.9"
+authors = [{ name = "Interchained LLC" }]
+keywords = ["llm", "inference", "residency", "provenance", "audit", "spine"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: System :: Distributed Computing",
+]
+
+[project.urls]
+Homepage = "https://github.com/aiassistsecure/gaia"
+Repository = "https://github.com/aiassistsecure/gaia"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "gaia._gaia"
+python-source = "python"
+manifest-path = "Cargo.toml"
