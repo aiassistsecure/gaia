@@ -1,0 +1,27 @@
+[package]
+name = "gaia-py"
+description = "Python bindings for gaia — read-only access to the hearth spine: seq, latest, why, state_as_of, and the mirror's events_since."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_gaia"
+crate-type = ["cdylib"]
+
+[dependencies]
+hearth-store = { path = "../hearth-store", version = "0.4.7" }
+gaia-api = { path = "../gaia-api", version = "0.4.7" }
+# abi3-py39: ONE wheel per platform covers every Python from 3.9 up —
+# the same packaging call hearth-py made, for the same reason.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The fixture writer (examples/spine_writer.rs) speaks in
+# hearth-core's LostReason; nothing in the bindings themselves does.
+hearth-core = { path = "../hearth-core", version = "0.4.7" }

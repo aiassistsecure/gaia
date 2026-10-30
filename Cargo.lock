@@ -370,6 +370,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gaia-py"
+version = "0.4.7"
+dependencies = [
+ "gaia-api",
+ "hearth-core",
+ "hearth-store",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
 name = "gaia-serve"
 version = "0.4.7"
 dependencies = [
