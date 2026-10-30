@@ -29,7 +29,11 @@
 //! ever acted on is the SI gate's decision, journaled in SI —
 //! and since G-6, the ticker also drains the work store after
 //! each step, handing every ADMIT-ted record to
-//! [`gaia_serve::Composition::actuate_work`]. The gate's
+//! [`gaia_serve::Composition::actuate_work`]. Since S-2b it
+//! also runs the seam egress pass after each step, POSTing
+//! every proposal SI has not yet ACKed to SI's proposal
+//! ingest (`--si-addr`) and recording the dispositions in
+//! `egress.jsonl`. The gate's
 //! decision is the only path from observation to action, and
 //! this loop is where that path is walked.
 //!
@@ -60,7 +64,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gaia_serve::{Composition, Leash, OutcomeStore, ProposalStore, SharedMirror, Watcher};
+use gaia_serve::{
+    Composition, EgressStore, HttpProposalSink, Leash, OutcomeStore, ProposalStore, SharedMirror,
+    Watcher,
+};
 use hearth_core::{Budget, Declared};
 use hearth_pull::PullConfig;
 use hearth_serve::server::{free_port, ServerSpec};
@@ -95,7 +102,8 @@ fn usage_exit() -> ! {
     eprintln!(
         "usage: gaia --model NAME=PATH [--model NAME=PATH …] \
          [--home DIR] [--port N] [--events-port N] [--binary PATH] \
-         [--total-gib N] [--watch NAME …] [--watch-all]"
+         [--total-gib N] [--watch NAME …] [--watch-all] \
+         [--si-addr HOST:PORT]"
     );
     std::process::exit(2);
 }
@@ -121,6 +129,11 @@ struct Args {
     total_gib: u64,
     watch: Vec<String>,
     watch_all: bool,
+    /// Where SI's proposal ingest listens (`HOST:PORT`), if
+    /// the operator wired the seam. `None` is a legitimate
+    /// deployment: proposals accumulate un-ACKed in the egress
+    /// log's pending set (G-9 §13.1), they are not dropped.
+    si_addr: Option<String>,
 }
 
 /// Take a flag's value: the inline `--flag=value` form if one
@@ -174,6 +187,10 @@ fn parse_args() -> Args {
         total_gib: 24,
         watch: Vec::new(),
         watch_all: false,
+        si_addr: match std::env::var("GAIA_SI_ADDR") {
+            Ok(v) if !v.is_empty() => Some(v),
+            _ => None,
+        },
     };
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -215,6 +232,7 @@ fn parse_args() -> Args {
                 }
                 args.watch_all = true;
             }
+            "--si-addr" => args.si_addr = Some(take_value(&argv, &mut i, inline)),
             _ => usage_exit(),
         }
         i += 1;
@@ -292,6 +310,31 @@ fn ticker_loop(
             // going: one bad poll must not end supervision of
             // every other model on the box.
             Err(e) => eprintln!("gaia: tick failed: {e}"),
+        }
+
+        // The seam egress (S-2b): offer every un-ACKed
+        // proposal to SI and record the answers. A pass that
+        // attempted nothing logs nothing (the common case);
+        // a failed pass — an ACK that could not be recorded —
+        // is reported and the loop keeps going, because the
+        // next pass re-sends and SI's dedup makes that free.
+        let egress = {
+            let mut guard = comp.lock().unwrap_or_else(|p| p.into_inner());
+            guard.egress_pass()
+        };
+        match egress {
+            Ok(pass) if pass.attempted > 0 => eprintln!(
+                "gaia: egress — {} attempted, {} acked, {} rejected, {} escalated, \
+                 {} failed, {} still pending",
+                pass.attempted,
+                pass.acked,
+                pass.rejected,
+                pass.escalated,
+                pass.failed,
+                pass.still_pending
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("gaia: egress failed: {e}"),
         }
 
         // The drain. The scan is taken and released before any
@@ -473,6 +516,29 @@ fn main() {
         progress: false,
         verify_existing: false,
     });
+
+    // The seam egress store (S-2b), file-backed under the
+    // same home: which proposals SI answered is retry state,
+    // and a restart that forgot it would re-send answered
+    // proposals — SI's dedup would absorb them, but the
+    // egress log exists so the fork does not have to lean on
+    // that. The sink exists only if the operator named SI's
+    // ingest address; without one the ticker's egress pass
+    // sends nothing and says so once, here, not every 500 ms.
+    comp.set_egress_store(
+        EgressStore::open(&home.join("egress.jsonl"))
+            .unwrap_or_else(|e| fail(format!("opening egress store: {e}"))),
+    );
+    match &args.si_addr {
+        Some(addr) => {
+            comp.set_egress_sink(Box::new(HttpProposalSink::new(addr)));
+            eprintln!("gaia: seam egress to SI at {addr} (POST /gaia/proposals)");
+        }
+        None => eprintln!(
+            "gaia: seam egress not configured (no --si-addr / GAIA_SI_ADDR); \
+             proposals will accumulate un-ACKed"
+        ),
+    }
 
     // Start each declared model. A refusal is not a crash —
     // mirror upstream's `cmd_up`: say it and keep going, because
