@@ -9,16 +9,19 @@
 //! until the gate speaks, however long that takes.
 //!
 //! This is the G-3 skeleton store, and it is honest about being
-//! one. Records live in memory and die with the process. Nothing
-//! here is persisted to the spine — spine persistence is G-4, and
-//! [`WorkRecord::status_body`] says so in its own shape by
-//! returning an empty `spine_event_refs` list rather than refs
-//! that were never written. The store is the verdict state
-//! machine and nothing more: no policy, no gate checks, no
-//! judgement about whether an intent *should* be admitted. That
-//! stays in SI, where G-2 put it.
+//! one. Records live in memory and die with the process, and the
+//! store itself persists nothing. What the status body reports
+//! is exactly what the record holds: since S-1 (G-9 §11.2), once
+//! work has completed, [`WorkRecord::status_body`] carries the
+//! spine refs the actuation recorded in its outcome result —
+//! and before completion, or when the outcome recorded none,
+//! the honest empty list rather than refs that were never
+//! written. The store is the verdict state machine and nothing
+//! more: no policy, no gate checks, no judgement about whether
+//! an intent *should* be admitted. That stays in SI, where
+//! G-2 put it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde_json::{json, Value};
@@ -131,15 +134,28 @@ impl WorkRecord {
     /// caller can tell "not finished" from "finished with a null
     /// result" without guessing.
     pub fn status_body(&self) -> Value {
-        // spine_event_refs is empty in G-3 — spine persistence is
-        // G-4; do not fake refs. Nothing was written to the spine
-        // for this record, so the honest list is the empty one.
+        // The provenance block's spine refs (S-1, G-9 §11.2):
+        // a completed record's result is the exact JSON the
+        // actuator filed in the outcome store, and it carries
+        // the `spine_event_refs` the actuation recorded — so
+        // the provenance block reports those, read out of the
+        // outcome record's own result. Before completion there
+        // is no outcome and the honest list is the empty one;
+        // a completed outcome that recorded no refs (a refusal,
+        // a `hearth.notify`) likewise reports the empty list.
+        let spine_event_refs = self
+            .result
+            .as_ref()
+            .and_then(|r| r.get("spine_event_refs"))
+            .filter(|v| v.is_array())
+            .cloned()
+            .unwrap_or_else(|| json!([]));
         let mut body = json!({
             "work_id": self.id,
             "state": self.state.as_str(),
             "provenance": {
                 "si_journal_seqs": [self.intent.journal_seq],
-                "spine_event_refs": [],
+                "spine_event_refs": spine_event_refs,
             },
         });
         if let Some(result) = &self.result {
@@ -224,6 +240,15 @@ pub trait WorkStore {
     /// `Admit` ⇒ `Admitted`, `Reject` ⇒ `Rejected`, none ⇒
     /// `AwaitingVerdict`. A class this fork does not carry is
     /// refused before any id is spent.
+    ///
+    /// Submission dedup is part of this contract (G-9 §9.3): a
+    /// submission whose `journal_seq` is already recorded
+    /// returns the existing record, in whatever state it now
+    /// stands, recording nothing new and spending no id. The
+    /// carried-class refusal still comes first, so an
+    /// uncarried class is refused even on a recorded sequence.
+    /// The behaviour lives in the store, not the gateway, so
+    /// every store consumer inherits it.
     fn submit(&mut self, intent: Intent) -> Result<WorkRecord, GaiaError>;
 
     /// A clone of the record under `id`, or `None`.
@@ -249,15 +274,19 @@ pub trait WorkStore {
 ///
 /// Records are kept in submission order in a `Vec`; the counts
 /// here are work orders per process lifetime, and a linear scan
-/// states that plainly instead of dressing the skeleton up with
-/// an index it does not need. Ids are `work-000001`,
-/// `work-000002`, …, spent only on submissions that are actually
-/// recorded — a refused submission burns no id.
+/// states that plainly. The store carries exactly one index:
+/// the `journal_seq` → work id dedup index S-1 added (G-9
+/// §9.3), because looking a prior submission up by its SI
+/// journal sequence is the one lookup a retrying submitter
+/// depends on. Ids are `work-000001`, `work-000002`, …, spent
+/// only on submissions that are actually recorded — a refused
+/// or duplicate submission burns no id.
 #[derive(Debug, Clone)]
 pub struct MemoryWorkStore {
     records: Vec<WorkRecord>,
     next: u64,
     carried: HashSet<String>,
+    by_journal_seq: HashMap<u64, String>,
 }
 
 impl MemoryWorkStore {
@@ -282,6 +311,7 @@ impl MemoryWorkStore {
             records: Vec::new(),
             next: 1,
             carried: classes.into_iter().collect(),
+            by_journal_seq: HashMap::new(),
         }
     }
 
@@ -311,6 +341,16 @@ impl WorkStore for MemoryWorkStore {
                 intent.class
             )));
         }
+        // Dedup (G-9 §9.3), after the class check on purpose: a
+        // journal_seq already recorded is SI submitting the same
+        // journaled intent again, not new work. Hand back the
+        // existing record as it now stands — awaiting, admitted,
+        // or executed — and record nothing, spend no id.
+        if let Some(existing_id) = self.by_journal_seq.get(&intent.journal_seq).cloned() {
+            if let Some(existing) = self.get(&existing_id) {
+                return Ok(existing);
+            }
+        }
         // Accepted exists for the 202 acknowledgement vocabulary;
         // stored records start in one of the three states derived
         // here, never in Accepted.
@@ -326,6 +366,8 @@ impl WorkStore for MemoryWorkStore {
             result: None,
         };
         self.next += 1;
+        self.by_journal_seq
+            .insert(record.intent.journal_seq, record.id.clone());
         self.records.push(record.clone());
         Ok(record)
     }
@@ -428,6 +470,12 @@ mod tests {
         intent_in_class(verdict, "execute")
     }
 
+    fn intent_seq(verdict: Option<Verdict>, seq: u64) -> Intent {
+        let mut intent = intent(verdict);
+        intent.journal_seq = seq;
+        intent
+    }
+
     fn intent_in_class(verdict: Option<Verdict>, class: &str) -> Intent {
         Intent {
             tool: "hearth.restart".to_string(),
@@ -486,15 +534,15 @@ mod tests {
     #[test]
     fn submit_derives_state_from_carried_verdict() {
         let mut store = MemoryWorkStore::new();
-        let admitted = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let admitted = store.submit(intent_seq(Some(Verdict::Admit), 42)).unwrap();
         assert_eq!(admitted.state, WorkState::Admitted);
         assert_eq!(admitted.id, "work-000001");
 
-        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let rejected = store.submit(intent_seq(Some(Verdict::Reject), 43)).unwrap();
         assert_eq!(rejected.state, WorkState::Rejected);
         assert_eq!(rejected.id, "work-000002");
 
-        let escalated = store.submit(intent(None)).unwrap();
+        let escalated = store.submit(intent_seq(None, 44)).unwrap();
         assert_eq!(escalated.state, WorkState::AwaitingVerdict);
         assert_eq!(escalated.id, "work-000003");
 
@@ -506,9 +554,9 @@ mod tests {
     #[test]
     fn records_returns_all_records_in_submission_order_with_their_states() {
         let mut store = MemoryWorkStore::new();
-        let admitted = store.submit(intent(Some(Verdict::Admit))).unwrap();
-        let escalated = store.submit(intent(None)).unwrap();
-        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let admitted = store.submit(intent_seq(Some(Verdict::Admit), 42)).unwrap();
+        let escalated = store.submit(intent_seq(None, 43)).unwrap();
+        let rejected = store.submit(intent_seq(Some(Verdict::Reject), 44)).unwrap();
         store
             .complete(&admitted.id, json!({ "restarted": true }))
             .unwrap();
@@ -561,14 +609,79 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_submit_returns_the_existing_record_and_spends_no_id() {
+        let mut store = MemoryWorkStore::new();
+        let first = store.submit(intent(Some(Verdict::Admit))).unwrap();
+
+        // The same journal_seq again is the same journaled
+        // intent resubmitted, not new work.
+        let duplicate = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(duplicate, first);
+        assert_eq!(store.records().len(), 1);
+
+        // The duplicate spent no id: the next distinct
+        // submission takes the id it would have burned.
+        let next = store.submit(intent_seq(Some(Verdict::Admit), 43)).unwrap();
+        assert_eq!(next.id, "work-000002");
+        assert_eq!(store.records().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_submit_after_a_verdict_returns_the_current_state() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(None)).unwrap();
+        store.record_verdict(&rec.id, Verdict::Admit).unwrap();
+
+        // Not a fresh awaiting record: the record as it stands,
+        // verdict and all.
+        let duplicate = store.submit(intent(None)).unwrap();
+        assert_eq!(duplicate.id, rec.id);
+        assert_eq!(duplicate.state, WorkState::Admitted);
+        assert_eq!(duplicate.intent.verdict, Some(Verdict::Admit));
+        assert_eq!(store.records().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_submit_after_execution_returns_the_executed_record() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        store
+            .complete(&rec.id, json!({ "restarted": true }))
+            .unwrap();
+
+        let duplicate = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(duplicate.id, rec.id);
+        assert_eq!(duplicate.state, WorkState::Executed);
+        assert_eq!(duplicate.result, Some(json!({ "restarted": true })));
+        assert_eq!(store.records().len(), 1);
+    }
+
+    #[test]
+    fn class_refused_submission_records_no_dedup_entry() {
+        let mut store = MemoryWorkStore::new();
+        // journal_seq 42 is refused on class grounds, so nothing
+        // is recorded under it — the refusal must not poison
+        // the sequence for a later carried submission.
+        let err = store
+            .submit(intent_in_class(Some(Verdict::Admit), "external"))
+            .unwrap_err();
+        assert_eq!(err.error_type(), "gaia_class_not_carried");
+
+        let ok = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(ok.id, "work-000001");
+        assert_eq!(ok.state, WorkState::Admitted);
+        assert_eq!(store.records().len(), 1);
+    }
+
+    #[test]
     fn verdict_transitions_an_awaiting_record_once() {
         let mut store = MemoryWorkStore::new();
-        let a = store.submit(intent(None)).unwrap();
+        let a = store.submit(intent_seq(None, 42)).unwrap();
         let admitted = store.record_verdict(&a.id, Verdict::Admit).unwrap();
         assert_eq!(admitted.state, WorkState::Admitted);
         assert_eq!(admitted.intent.verdict, Some(Verdict::Admit));
 
-        let r = store.submit(intent(None)).unwrap();
+        let r = store.submit(intent_seq(None, 43)).unwrap();
         let rejected = store.record_verdict(&r.id, Verdict::Reject).unwrap();
         assert_eq!(rejected.state, WorkState::Rejected);
         assert_eq!(rejected.intent.verdict, Some(Verdict::Reject));
@@ -577,7 +690,7 @@ mod tests {
     #[test]
     fn double_verdict_is_a_conflict() {
         let mut store = MemoryWorkStore::new();
-        let rec = store.submit(intent(None)).unwrap();
+        let rec = store.submit(intent_seq(None, 42)).unwrap();
         store.record_verdict(&rec.id, Verdict::Admit).unwrap();
         let err = store.record_verdict(&rec.id, Verdict::Reject).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
@@ -585,7 +698,7 @@ mod tests {
         assert!(err.message().contains("admitted"));
 
         // A pre-admitted submission already has its verdict, too.
-        let pre = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let pre = store.submit(intent_seq(Some(Verdict::Admit), 43)).unwrap();
         let err = store.record_verdict(&pre.id, Verdict::Admit).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
     }
@@ -610,18 +723,18 @@ mod tests {
     fn claim_refuses_without_an_admit_verdict() {
         let mut store = MemoryWorkStore::new();
 
-        let awaiting = store.submit(intent(None)).unwrap();
+        let awaiting = store.submit(intent_seq(None, 42)).unwrap();
         let err = store.claim_for_actuation(&awaiting.id).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_required");
         assert_eq!(err.status(), 409);
         assert!(err.message().contains("no recorded verdict"));
 
-        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let rejected = store.submit(intent_seq(Some(Verdict::Reject), 43)).unwrap();
         let err = store.claim_for_actuation(&rejected.id).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
         assert!(err.message().contains("can never actuate"));
 
-        let done = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let done = store.submit(intent_seq(Some(Verdict::Admit), 44)).unwrap();
         store.complete(&done.id, json!(null)).unwrap();
         let err = store.claim_for_actuation(&done.id).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
@@ -653,12 +766,12 @@ mod tests {
     #[test]
     fn complete_from_any_other_state_is_a_conflict() {
         let mut store = MemoryWorkStore::new();
-        let awaiting = store.submit(intent(None)).unwrap();
+        let awaiting = store.submit(intent_seq(None, 42)).unwrap();
         let err = store.complete(&awaiting.id, json!(null)).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
         assert!(err.message().contains("awaiting_verdict"));
 
-        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let rejected = store.submit(intent_seq(Some(Verdict::Reject), 43)).unwrap();
         let err = store.complete(&rejected.id, json!(null)).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
         assert!(err.message().contains("rejected"));
@@ -722,12 +835,12 @@ mod tests {
 
         // The acceptance case, proven: an escalated intent cannot
         // reach the actuator without a recorded verdict.
-        let escalated = store.submit(intent(None)).unwrap();
+        let escalated = store.submit(intent_seq(None, 42)).unwrap();
         let err = run_actuation(&mut store, &mut actuator, &escalated.id).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_required");
         assert_eq!(actuator.calls, 0);
 
-        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let rejected = store.submit(intent_seq(Some(Verdict::Reject), 43)).unwrap();
         let err = run_actuation(&mut store, &mut actuator, &rejected.id).unwrap_err();
         assert_eq!(err.error_type(), "gaia_verdict_conflict");
         assert_eq!(actuator.calls, 0);
