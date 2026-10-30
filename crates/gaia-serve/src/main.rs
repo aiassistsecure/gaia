@@ -65,8 +65,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gaia_serve::{
-    Composition, EgressStore, HttpProposalSink, Leash, OutcomeStore, ProposalStore, SharedMirror,
-    Watcher,
+    Composition, EgressStore, HttpProposalSink, Leash, LeashFeed, OutcomeStore, ProposalStore,
+    SharedMirror, Watcher,
 };
 use hearth_core::{Budget, Declared};
 use hearth_pull::PullConfig;
@@ -377,10 +377,11 @@ fn ticker_loop(
 
 /// Serve one agency connection: read the request, answer the
 /// structured residency route from the spine if that is what
-/// it is, and hand everything else to the gaia work gateway
-/// over the shared work store. The response is written back in
-/// upstream's rendered shape — the same `render_response`
-/// upstream's gateway loop uses.
+/// it is, answer the leash routes from the composition's
+/// replica if that is what it is, and hand everything else
+/// to the gaia work gateway over the shared work store. The
+/// response is written back in upstream's rendered shape —
+/// the same `render_response` upstream's gateway loop uses.
 fn handle_agency(
     mut stream: TcpStream,
     comp: Arc<Mutex<Composition>>,
@@ -409,8 +410,23 @@ fn handle_agency(
     let resp = match resp {
         Some(r) => r,
         None => {
-            let mut store = work_store.lock().unwrap_or_else(|p| p.into_inner());
-            gaia_api::gateway::decide(&req, &mut *store)
+            // Leash routes next: they write the replica the
+            // composition holds, so — like residency — they
+            // are answered from the composition, not the work
+            // gateway. The response is owned, so the lock is
+            // released before any socket write.
+            let leash_resp = {
+                let mut guard = comp.lock().unwrap_or_else(|p| p.into_inner());
+                let mut sink = guard.leash_sink();
+                gaia_api::leash::handle(&req, &mut sink)
+            };
+            match leash_resp {
+                Some(r) => r,
+                None => {
+                    let mut store = work_store.lock().unwrap_or_else(|p| p.into_inner());
+                    gaia_api::gateway::decide(&req, &mut *store)
+                }
+            }
         }
     };
 
@@ -504,10 +520,19 @@ fn main() {
         OutcomeStore::open(&home.join("outcomes.jsonl"))
             .unwrap_or_else(|e| fail(format!("opening outcome store: {e}"))),
     );
-    comp.set_leash(
-        Leash::open(&home.join("leash.jsonl"))
-            .unwrap_or_else(|e| fail(format!("opening leash: {e}"))),
+    let leash = Leash::open(&home.join("leash.jsonl"))
+        .unwrap_or_else(|e| fail(format!("opening leash: {e}")));
+    // The leash feed (S-4, G-9 §10.3): the replica's
+    // watermark and activation state, seeded from the leash
+    // it feeds and persisted beside it. Heartbeat stamps
+    // are per-process by design, so a restarted binary's
+    // seam models are stale until SI's feed speaks again —
+    // fail-closed across restarts, as §15 S-4 requires.
+    comp.set_leash_feed(
+        LeashFeed::open(&home.join("leash-feed.json"), &leash)
+            .unwrap_or_else(|e| fail(format!("opening leash feed: {e}"))),
     );
+    comp.set_leash(leash);
     // Re-pulls land in <home>/blobs, upstream's `cmd_pull`
     // default; progress off because this binary's stderr is a
     // log, not a terminal.

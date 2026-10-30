@@ -91,12 +91,14 @@ args verbatim through the §5.3 primitives:
   `PullStarted`/`PullCompleted` in the spine itself.
 - `hearth.notify` → an outcome record; no process action.
 
-Two checks stand in front of every process actuation, in
-this order: the **leash** (a stop SI journaled and has not
-resumed, held in `leash.jsonl` — §5.2.1) and the
-**stale-state check** (the fleet has moved on since the
-proposal: the model recovered, or the intent answers a loss
-that is no longer the latest event). A failed check is a
+Checks stand in front of every process actuation, in
+this order: the **leash-feed staleness gate** (S-4, below —
+only for models the seam feed is active for), the
+**leash** (a stop SI journaled and has not resumed, held
+in `leash.jsonl` — §5.2.1), and the **stale-state check**
+(the fleet has moved on since the proposal: the model
+recovered, or the intent answers a loss that is no longer
+the latest event). A failed check is a
 *refusal*: recorded in `outcomes.jsonl`, returned as the
 work's result, never executed. Every outcome — executed,
 refused, failed — is recorded the same way, with the spine
@@ -140,3 +142,45 @@ proposal is provenance, not a work submission (that is
 S-3). There is no authentication anywhere — loopback is
 the entire security model, as everywhere in this binary
 (G-9 §14). Performance is unmeasured.
+
+## Leash crossing (S-4, fork half)
+
+The leash used to arrive only in-process. Now the fork
+takes it over the wire, the way G-9 §10 designs it: SI's
+journal stays the leash's home, and this composition's
+`leash.jsonl` becomes a **derived replica** with exactly
+one writer path — `POST /gaia/v1/leash` and
+`POST /gaia/v1/leash/heartbeat`, answered by the agency
+listener from the composition. A `LeashFeed`
+(`leash-feed.json`, beside the leash) keeps the replica
+honest:
+
+- **Watermark.** Records apply only in SI journal order:
+  a record at or below the model's applied `journal_seq`
+  is ACKed (`applied: false`) and not applied, so a
+  delayed duplicate `resume` can never lift a newer
+  `stop`. A snapshot re-sync is the same record shape
+  under the same rule (§10.5) — no second state machine.
+- **Staleness, fail-closed.** Once the feed is active for
+  a model, actuation refuses (`refusal: "leash"`, detail
+  naming the cause and the watermark) when no heartbeat
+  has arrived within the TTL (30 s — an UNMEASURED policy
+  constant), when the watermark is behind a tip the fork
+  has been told about, or when the feed carries an
+  unrecovered transport fault. A fresh heartbeat plus a
+  current watermark restores actuation. `hearth.notify`
+  is exempt, as it has always been: it actuates nothing.
+- **No stop expiry, ever.** The TTL gates actuation
+  freshness, never a stop's validity — a stale feed
+  refuses everything and resumes nothing. Only an
+  explicit resume record lifts a stop.
+- **Restart.** Watermarks and activation persist;
+  heartbeat stamps do not. After a restart, a seam model
+  is stale until the snapshot and the first heartbeat
+  arrive.
+
+What this is not: the SI half. Nothing here sends leash
+records — SI's seam client (the S-4 SI PR) will POST fold
+changes and heartbeats when it lands; until then records
+arrive from tests and operator tooling, and this half
+claims fork-side proof only.

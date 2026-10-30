@@ -21,16 +21,20 @@
 //!     inferred from the current fleet, nothing is
 //!     substituted, and no substitute action is improvised:
 //!     proposals are answered, not reinterpreted.
-//!   * **Leash first, stale-state second, primitive last
-//!     (§5.2.1, §5.3).** For every tool that touches the
-//!     runtime, the operator leash is checked before anything
-//!     else, then the fleet's current state is checked
-//!     against the event the intent answers, and only then
-//!     does a §5.3 primitive run. A refusal at either check
-//!     is an *answer* to the proposal — recorded, returned,
-//!     and terminal for that work record. Re-asking means a
-//!     new intent from SI, never a silent retry of a stale
-//!     one.
+//!   * **Staleness first, leash second, stale-state third,
+//!     primitive last (§5.2.1, §5.3).** For every tool that
+//!     touches the runtime, the checks run in that order and
+//!     only then does a §5.3 primitive run. The staleness
+//!     gate arrives with S-4 (G-9 §10.3.4): when a leash
+//!     feed is installed, the freshness of the fork's leash
+//!     replica is judged before the leash itself — a stale
+//!     replica's stop state cannot be trusted either way —
+//!     and with no feed installed the gate is absent and the
+//!     leash check is first, exactly as before S-4. A
+//!     refusal at any check is an *answer* to the proposal
+//!     — recorded, returned, and terminal for that work
+//!     record. Re-asking means a new intent from SI, never
+//!     a silent retry of a stale one.
 //!   * **Every terminal path is recorded.** Executed,
 //!     refused, and failed actuations each land in the
 //!     [`OutcomeStore`] before the result is returned, so the
@@ -74,6 +78,11 @@ pub struct FleetActuator<'a> {
     pub supervisor: &'a mut hearth_serve::Supervisor,
     pub specs: &'a std::collections::HashMap<String, hearth_serve::server::ServerSpec>,
     pub leash: &'a Leash,
+    /// The S-4 leash feed (G-9 §10.3), when the composition
+    /// has one installed: the freshness judge for the leash
+    /// replica in `leash`. `None` is the pre-S-4 posture —
+    /// no staleness gate, the leash is read as it stands.
+    pub leash_feed: Option<&'a crate::leash_feed::LeashFeed>,
     pub outcomes: &'a mut OutcomeStore,
     pub pull_cfg: &'a hearth_pull::PullConfig,
 }
@@ -286,6 +295,36 @@ impl FleetActuator<'_> {
         Some(self.refuse(work, model, "leash", detail, caused_by))
     }
 
+    /// The staleness check (G-9 §10.3.4), first for every
+    /// tool that touches the runtime when a leash feed is
+    /// installed: if the fork's leash replica for `model` is
+    /// stale — no heartbeat within the TTL (or none ever),
+    /// the watermark behind a tip SI has reported, or an
+    /// unrecovered transport fault — the actuation refuses,
+    /// because a stale replica's stop state cannot be
+    /// trusted either way: it might be missing a stop, or
+    /// holding one SI has already resumed. The refusal is
+    /// the leash refusal shape (§12.4): kind `"leash"`,
+    /// detail naming the staleness cause and the watermark.
+    /// Returns the refusal result when the replica is stale,
+    /// `None` when there is no feed or the feed is fresh.
+    fn staleness_refusal(
+        &mut self,
+        work: &WorkRecord,
+        model: &str,
+        caused_by: Option<EventRef>,
+    ) -> Option<Result<Value, GaiaError>> {
+        let feed = self.leash_feed?;
+        let cause = feed.staleness(model, std::time::Instant::now())?;
+        // The cause's description and the watermark are
+        // copied out before `finish` needs `&mut self`: the
+        // feed borrow cannot be held across recording the
+        // refusal it caused.
+        let (cause, watermark) = (cause.describe(), feed.watermark(model));
+        let detail = format!("leash state stale: {cause}; watermark {watermark}");
+        Some(self.refuse(work, model, "leash", detail, caused_by))
+    }
+
     /// The model's latest spine event, owned, for the
     /// stale-state check and its detail string.
     fn latest(&self, model: &str) -> Option<hearth_store::Event> {
@@ -308,6 +347,7 @@ impl FleetActuator<'_> {
     /// which is why the leash does not apply here (the leash
     /// governs actuation, and notify actuates nothing) and why
     /// `spine_event_refs` is empty: no spine event was written.
+    /// The §10.3.5 exemption now also covers staleness: notify takes no staleness check either.
     fn actuate_notify(&mut self, work: &WorkRecord, model: &str) -> Result<Value, GaiaError> {
         let spine_event = parse_spine_event(&work.intent.args)?;
         let detail = format!(
@@ -330,12 +370,20 @@ impl FleetActuator<'_> {
     fn actuate_restart(&mut self, work: &WorkRecord, model: &str) -> Result<Value, GaiaError> {
         let spine_event = parse_spine_event(&work.intent.args)?;
 
-        // 1. Leash (§5.2.1).
+        // 1. Staleness (G-9 §10.3.4): freshness is judged
+        // before the stop the replica carries, because a
+        // stale replica's stop state cannot be trusted
+        // either way.
+        if let Some(refusal) = self.staleness_refusal(work, model, Some(spine_event.clone())) {
+            return refusal;
+        }
+
+        // 2. Leash (§5.2.1).
         if let Some(refusal) = self.leash_refusal(work, model, Some(spine_event.clone())) {
             return refusal;
         }
 
-        // 2. Stale state (§5.3): restart actuates only if the
+        // 3. Stale state (§5.3): restart actuates only if the
         // model's latest spine event *is* the lost event the
         // intent answers — same kind, same hash, same seq. A
         // model that recovered, was restarted by an earlier
@@ -357,7 +405,7 @@ impl FleetActuator<'_> {
             return self.refuse(work, model, "stale_state", detail, Some(spine_event));
         }
 
-        // 3. Primitive: `Supervisor::start` over the stored
+        // 4. Primitive: `Supervisor::start` over the stored
         // spec — the same call upstream's unsupervised path
         // makes internally, here behind the gate. A model with
         // no stored spec cannot be restarted: the composition
@@ -412,17 +460,25 @@ impl FleetActuator<'_> {
     fn actuate_stop(&mut self, work: &WorkRecord, model: &str) -> Result<Value, GaiaError> {
         let spine_event = parse_spine_event(&work.intent.args)?;
 
-        // 1. Leash (§5.2.1): a stop already in force is also
+        // 1. Staleness (G-9 §10.3.4): freshness is judged
+        // before the stop the replica carries, because a
+        // stale replica's stop state cannot be trusted
+        // either way.
+        if let Some(refusal) = self.staleness_refusal(work, model, Some(spine_event.clone())) {
+            return refusal;
+        }
+
+        // 2. Leash (§5.2.1): a stop already in force is also
         // the answer to a stop intent — the leash check is
-        // first for every runtime-touching tool, with no
-        // carve-out for "but this one agrees with the leash";
-        // agreement is still the leash speaking, and the
-        // refusal records that it did.
+        // second only to staleness for every runtime-touching
+        // tool, with no carve-out for "but this one agrees
+        // with the leash"; agreement is still the leash
+        // speaking, and the refusal records that it did.
         if let Some(refusal) = self.leash_refusal(work, model, Some(spine_event.clone())) {
             return refusal;
         }
 
-        // 2. Stale state (§5.3): stop actuates only while the
+        // 3. Stale state (§5.3): stop actuates only while the
         // model is `resident` or `loading` — states with a
         // child to stop. Stopping a model that is already
         // lost, unloaded, or never recorded would report a
@@ -440,7 +496,7 @@ impl FleetActuator<'_> {
             return self.refuse(work, model, "stale_state", detail, Some(spine_event));
         }
 
-        // 3. Primitive: `Supervisor::stop`.
+        // 4. Primitive: `Supervisor::stop`.
         match self.supervisor.stop(model) {
             Ok(()) => {
                 let refs = self
@@ -478,19 +534,27 @@ impl FleetActuator<'_> {
         let reference = parse_reference(&work.intent.args)?;
         let caused_by = parse_spine_event_opt(&work.intent.args)?;
 
-        // 1. Leash (§5.2.1).
+        // 1. Staleness (G-9 §10.3.4): freshness is judged
+        // before the stop the replica carries, because a
+        // stale replica's stop state cannot be trusted
+        // either way.
+        if let Some(refusal) = self.staleness_refusal(work, model, caused_by.clone()) {
+            return refusal;
+        }
+
+        // 2. Leash (§5.2.1).
         if let Some(refusal) = self.leash_refusal(work, model, caused_by.clone()) {
             return refusal;
         }
 
-        // 2. No stale-state check: repull has no residency
+        // 3. No stale-state check: repull has no residency
         // staleness. Bytes are bytes — having them re-fetched
         // answers a question about the *bytes* (stale-weights
         // suspicion, a failed pull), not about a residency
         // event that may have been superseded, so there is no
         // latest-event identity to compare against.
         //
-        // 3. Primitive: `hearth_pull::pull`, as upstream's
+        // 4. Primitive: `hearth_pull::pull`, as upstream's
         // `cmd_pull` calls it.
         match hearth_pull::pull(&reference, self.pull_cfg, self.supervisor.spine()) {
             Ok(pulled) => {
@@ -677,6 +741,10 @@ mod tests {
             supervisor: sup,
             specs,
             leash,
+            // No feed installed: the pre-S-4 posture, so
+            // these unit tests exercise bit-identical
+            // behaviour to before the staleness gate existed.
+            leash_feed: None,
             outcomes,
             pull_cfg: cfg,
         };
