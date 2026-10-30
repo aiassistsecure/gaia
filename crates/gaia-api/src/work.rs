@@ -8,9 +8,11 @@
 //! intent that arrives verdict-less waits in `awaiting_verdict`
 //! until the gate speaks, however long that takes.
 //!
-//! This is the G-3 skeleton store, and it is honest about being
-//! one. Records live in memory and die with the process, and the
-//! store itself persists nothing. What the status body reports
+//! The G-3 skeleton store ([`MemoryWorkStore`]) is honest
+//! about being one: its records live in memory and die with
+//! the process. [`FileWorkStore`] is the same state machine
+//! made durable — full-record JSONL snapshots, appended and
+//! flushed before any transition is believed. What the status body reports
 //! is exactly what the record holds: since S-1 (G-9 §11.2), once
 //! work has completed, [`WorkRecord::status_body`] carries the
 //! spine refs the actuation recorded in its outcome result —
@@ -23,6 +25,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -36,6 +41,45 @@ use serde_json::{json, Value};
 pub enum Verdict {
     Admit,
     Reject,
+}
+
+impl Intent {
+    /// The on-disk JSONL shape of one intent: exactly the
+    /// submission's fields, with `verdict` as `null` for an
+    /// escalated intent or its wire spelling otherwise.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "tool": self.tool,
+            "args": self.args,
+            "reason": self.reason,
+            "task_id": self.task_id,
+            "journal_seq": self.journal_seq,
+            "class": self.class,
+            "verdict": self.verdict.map(|v| v.as_str()),
+        })
+    }
+
+    /// Parse one intent back from its JSONL shape. Returns
+    /// `None` for anything not recognisably an intent — an
+    /// unrecognised verdict spelling included — so the store
+    /// counts the line as a load failure instead of guessing.
+    pub fn from_json(v: &Value) -> Option<Intent> {
+        let obj = v.as_object()?;
+        let verdict = match obj.get("verdict") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(Verdict::parse(s)?),
+            Some(_) => return None,
+        };
+        Some(Intent {
+            tool: obj.get("tool")?.as_str()?.to_string(),
+            args: obj.get("args").cloned().unwrap_or(Value::Null),
+            reason: obj.get("reason")?.as_str()?.to_string(),
+            task_id: obj.get("task_id")?.as_str()?.to_string(),
+            journal_seq: obj.get("journal_seq")?.as_u64()?,
+            class: obj.get("class")?.as_str()?.to_string(),
+            verdict,
+        })
+    }
 }
 
 impl Verdict {
@@ -105,6 +149,19 @@ pub enum WorkState {
 }
 
 impl WorkState {
+    /// Parse the spelling [`WorkState::as_str`] writes.
+    /// Anything else is `None`, not a guess.
+    pub fn parse(s: &str) -> Option<WorkState> {
+        match s {
+            "accepted" => Some(WorkState::Accepted),
+            "awaiting_verdict" => Some(WorkState::AwaitingVerdict),
+            "admitted" => Some(WorkState::Admitted),
+            "rejected" => Some(WorkState::Rejected),
+            "executed" => Some(WorkState::Executed),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             WorkState::Accepted => "accepted",
@@ -126,6 +183,51 @@ pub struct WorkRecord {
 }
 
 impl WorkRecord {
+    /// The on-disk JSONL snapshot: one full record per line,
+    /// appended by [`FileWorkStore`] on every state-changing
+    /// transition. `result` is present only when the record
+    /// holds one, so a completed-with-null result (`Some`
+    /// holding JSON `null`) round-trips distinctly from a
+    /// record that has not completed.
+    pub fn to_json(&self) -> Value {
+        let mut body = json!({
+            "id": self.id,
+            "intent": self.intent.to_json(),
+            "state": self.state.as_str(),
+        });
+        if let Some(result) = &self.result {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("result".to_string(), result.clone());
+            }
+        }
+        body
+    }
+
+    /// Parse one snapshot back. Returns `None` for anything
+    /// not recognisably a work record — a torn final line
+    /// after a crash must not make the store unreadable; the
+    /// store counts it as a load failure instead. The id is
+    /// read from `id`, with `work_id` accepted as its alias.
+    pub fn from_json(v: &Value) -> Option<WorkRecord> {
+        let obj = v.as_object()?;
+        let id = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("work_id").and_then(Value::as_str))?
+            .to_string();
+        let result = if obj.contains_key("result") {
+            Some(obj.get("result")?.clone())
+        } else {
+            None
+        };
+        Some(WorkRecord {
+            id,
+            intent: Intent::from_json(obj.get("intent")?)?,
+            state: WorkState::parse(obj.get("state")?.as_str()?)?,
+            result,
+        })
+    }
+
     /// The `GET /gaia/v1/work/{id}` answer (G-2 §3.2): identity,
     /// state, the result once there is one, and the provenance
     /// trail — SI journal seqs plus spine event refs.
@@ -187,6 +289,9 @@ pub enum GaiaError {
     ClassNotCarried(String),
     /// The submission or verdict itself could not be read.
     Malformed(String),
+    /// The durable work store could not append a snapshot:
+    /// the transition was not recorded, in memory or on disk.
+    StoreIo(String),
 }
 
 impl GaiaError {
@@ -197,6 +302,7 @@ impl GaiaError {
             GaiaError::VerdictRequired(_) => "gaia_verdict_required",
             GaiaError::ClassNotCarried(_) => "gaia_class_not_carried",
             GaiaError::Malformed(_) => "gaia_malformed_request",
+            GaiaError::StoreIo(_) => "gaia_work_store_io",
         }
     }
 
@@ -207,6 +313,7 @@ impl GaiaError {
             GaiaError::VerdictRequired(_) => 409,
             GaiaError::ClassNotCarried(_) => 409,
             GaiaError::Malformed(_) => 400,
+            GaiaError::StoreIo(_) => 500,
         }
     }
 
@@ -218,7 +325,8 @@ impl GaiaError {
             | GaiaError::VerdictConflict(m)
             | GaiaError::VerdictRequired(m)
             | GaiaError::ClassNotCarried(m)
-            | GaiaError::Malformed(m) => m.clone(),
+            | GaiaError::Malformed(m)
+            | GaiaError::StoreIo(m) => m.clone(),
         }
     }
 }
@@ -434,6 +542,305 @@ impl WorkStore for MemoryWorkStore {
         record.state = WorkState::Executed;
         record.result = Some(result);
         Ok(record.clone())
+    }
+}
+
+/// The durable [`WorkStore`]: the same verdict state machine
+/// as [`MemoryWorkStore`], backed by an append-only JSONL file
+/// in the house discipline of the proposal and outcome stores.
+///
+/// On disk the file is one full [`WorkRecord`] snapshot per
+/// line (see [`WorkRecord::to_json`]), appended on every
+/// state-changing transition: a `submit` that records a new
+/// record, a `record_verdict`, and a `complete`. Claiming
+/// changes nothing and appends nothing; a duplicate submit
+/// (the S-1 dedup hit) appends nothing. On open the snapshots
+/// fold — first-seen id order is preserved, a later snapshot
+/// for the same id replaces the earlier one — and the
+/// `journal_seq` → work id dedup index and the next-id counter
+/// are rebuilt from the folded records. A missing file is an
+/// empty store; a malformed line, including a snapshot whose
+/// `journal_seq` is already folded under a *different* work
+/// id, is skipped and counted in
+/// [`FileWorkStore::load_failures`], never fatal.
+///
+/// Durability rule: a snapshot is appended and flushed
+/// *before* the in-memory change is kept. If the append
+/// fails, the in-memory change is rolled back — it was never
+/// made — and the caller gets a [`GaiaError::StoreIo`], never
+/// a believed-but-unrecorded state.
+#[derive(Debug, Clone)]
+pub struct FileWorkStore {
+    path: PathBuf,
+    records: Vec<WorkRecord>,
+    next: u64,
+    carried: HashSet<String>,
+    by_journal_seq: HashMap<u64, String>,
+    load_failures: Vec<String>,
+}
+
+impl FileWorkStore {
+    /// Open the durable store at `path`, carrying the default
+    /// classes: `read`, `write`, `execute`.
+    pub fn open(path: &Path) -> Result<FileWorkStore, String> {
+        Self::open_with_carried_classes(
+            path,
+            ["read", "write", "execute"]
+                .into_iter()
+                .map(str::to_string),
+        )
+    }
+
+    /// Open the durable store at `path`, carrying exactly
+    /// `classes`. A missing file is an empty store, not an
+    /// error. Malformed lines are skipped and counted in
+    /// [`FileWorkStore::load_failures`]; any other read error
+    /// is fatal, because loading a partial history silently
+    /// would break the dedup the store exists for.
+    pub fn open_with_carried_classes<I>(path: &Path, classes: I) -> Result<FileWorkStore, String>
+    where
+        I: IntoIterator,
+        I::Item: Into<String>,
+    {
+        let carried: HashSet<String> = classes.into_iter().map(Into::into).collect();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FileWorkStore {
+                    path: path.to_path_buf(),
+                    records: Vec::new(),
+                    next: 1,
+                    carried,
+                    by_journal_seq: HashMap::new(),
+                    load_failures: Vec::new(),
+                });
+            }
+            Err(e) => {
+                return Err(format!("cannot read work store {}: {e}", path.display()));
+            }
+        };
+
+        let mut records: Vec<WorkRecord> = Vec::new();
+        let mut by_journal_seq: HashMap<u64, String> = HashMap::new();
+        let mut load_failures: Vec<String> = Vec::new();
+        for (idx, line) in text.lines().enumerate() {
+            let line_no = idx + 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let snapshot = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|v| WorkRecord::from_json(&v));
+            let Some(snapshot) = snapshot else {
+                load_failures.push(format!("line {line_no}: not a work record; skipped"));
+                continue;
+            };
+            // A snapshot whose journal_seq is already folded
+            // under a different work id is not this record's
+            // history: it is a load failure, skipped and
+            // counted, and it folds nothing.
+            if let Some(existing_id) = by_journal_seq.get(&snapshot.intent.journal_seq) {
+                if existing_id != &snapshot.id {
+                    load_failures.push(format!(
+                        "line {line_no}: journal_seq {} already recorded for {existing_id}; skipped",
+                        snapshot.intent.journal_seq
+                    ));
+                    continue;
+                }
+            }
+            match records.iter().position(|r| r.id == snapshot.id) {
+                Some(pos) => {
+                    let old_seq = records[pos].intent.journal_seq;
+                    if old_seq != snapshot.intent.journal_seq
+                        && by_journal_seq.get(&old_seq) == Some(&snapshot.id)
+                    {
+                        by_journal_seq.remove(&old_seq);
+                    }
+                    records[pos] = snapshot.clone();
+                }
+                None => records.push(snapshot.clone()),
+            }
+            by_journal_seq.insert(snapshot.intent.journal_seq, snapshot.id.clone());
+        }
+        // The next id is spent only past the highest folded
+        // work-NNNNNN suffix: a reopened store never reissues
+        // an id the file already holds.
+        let next = records
+            .iter()
+            .filter_map(|r| {
+                r.id.strip_prefix("work-")
+                    .and_then(|suffix| suffix.parse::<u64>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        Ok(FileWorkStore {
+            path: path.to_path_buf(),
+            records,
+            next,
+            carried,
+            by_journal_seq,
+            load_failures,
+        })
+    }
+
+    /// Every record in the store, in first-seen submission
+    /// order — the drain's view, cloned like
+    /// [`MemoryWorkStore::records`].
+    pub fn records(&self) -> Vec<WorkRecord> {
+        self.records.clone()
+    }
+
+    /// Lines that failed to load when the store was opened.
+    pub fn load_failures(&self) -> &[String] {
+        &self.load_failures
+    }
+
+    /// The file this store appends its snapshots to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn position_of(&self, id: &str) -> Option<usize> {
+        self.records.iter().position(|r| r.id == id)
+    }
+
+    /// Append one snapshot line, flushed before returning —
+    /// the file is written first because the in-memory list
+    /// is only a view of the record.
+    fn append(&self, record: &WorkRecord) -> Result<(), GaiaError> {
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    GaiaError::StoreIo(format!(
+                        "cannot create work store directory {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| {
+                GaiaError::StoreIo(format!(
+                    "cannot open work store {}: {e}",
+                    self.path.display()
+                ))
+            })?;
+        writeln!(file, "{}", record.to_json()).map_err(|e| {
+            GaiaError::StoreIo(format!(
+                "cannot append to work store {}: {e}",
+                self.path.display()
+            ))
+        })?;
+        file.flush().map_err(|e| {
+            GaiaError::StoreIo(format!(
+                "cannot flush work store {}: {e}",
+                self.path.display()
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+impl WorkStore for FileWorkStore {
+    fn submit(&mut self, intent: Intent) -> Result<WorkRecord, GaiaError> {
+        if !self.carried.contains(&intent.class) {
+            return Err(GaiaError::ClassNotCarried(format!(
+                "class {:?} is not carried by this fork",
+                intent.class
+            )));
+        }
+        if let Some(existing_id) = self.by_journal_seq.get(&intent.journal_seq).cloned() {
+            if let Some(existing) = self.get(&existing_id) {
+                return Ok(existing);
+            }
+        }
+        let state = match intent.verdict {
+            Some(Verdict::Admit) => WorkState::Admitted,
+            Some(Verdict::Reject) => WorkState::Rejected,
+            None => WorkState::AwaitingVerdict,
+        };
+        let record = WorkRecord {
+            id: format!("work-{:06}", self.next),
+            intent,
+            state,
+            result: None,
+        };
+        // Append before believing: on failure nothing below
+        // runs — no record, no dedup entry, no id spent.
+        self.append(&record)?;
+        self.next += 1;
+        self.by_journal_seq
+            .insert(record.intent.journal_seq, record.id.clone());
+        self.records.push(record.clone());
+        Ok(record)
+    }
+
+    fn get(&self, id: &str) -> Option<WorkRecord> {
+        self.records.iter().find(|r| r.id == id).cloned()
+    }
+
+    fn record_verdict(&mut self, id: &str, verdict: Verdict) -> Result<WorkRecord, GaiaError> {
+        let pos = self
+            .position_of(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        let mut updated = self.records[pos].clone();
+        if updated.state != WorkState::AwaitingVerdict {
+            return Err(GaiaError::VerdictConflict(format!(
+                "work {id} is in state {}; a verdict can only be recorded while awaiting_verdict",
+                updated.state.as_str()
+            )));
+        }
+        updated.intent.verdict = Some(verdict);
+        updated.state = match verdict {
+            Verdict::Admit => WorkState::Admitted,
+            Verdict::Reject => WorkState::Rejected,
+        };
+        self.append(&updated)?;
+        self.records[pos] = updated.clone();
+        Ok(updated)
+    }
+
+    fn claim_for_actuation(&mut self, id: &str) -> Result<WorkRecord, GaiaError> {
+        let record = self
+            .get(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        match record.state {
+            WorkState::Admitted => Ok(record),
+            WorkState::AwaitingVerdict => Err(GaiaError::VerdictRequired(format!(
+                "work {id} has no recorded verdict; an escalated intent cannot actuate until the gate's verdict is delivered"
+            ))),
+            WorkState::Rejected => Err(GaiaError::VerdictConflict(format!(
+                "work {id} was rejected by the gate; a rejected intent can never actuate"
+            ))),
+            WorkState::Executed => Err(GaiaError::VerdictConflict(format!(
+                "work {id} already executed"
+            ))),
+            WorkState::Accepted => Err(GaiaError::VerdictRequired(format!(
+                "work {id} has no recorded verdict"
+            ))),
+        }
+    }
+
+    fn complete(&mut self, id: &str, result: Value) -> Result<WorkRecord, GaiaError> {
+        let pos = self
+            .position_of(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        let mut updated = self.records[pos].clone();
+        if updated.state != WorkState::Admitted {
+            return Err(GaiaError::VerdictConflict(format!(
+                "work {id} is in state {}; only admitted work can complete",
+                updated.state.as_str()
+            )));
+        }
+        updated.state = WorkState::Executed;
+        updated.result = Some(result);
+        self.append(&updated)?;
+        self.records[pos] = updated.clone();
+        Ok(updated)
     }
 }
 
@@ -868,5 +1275,235 @@ mod tests {
         let after = store.get(&rec.id).unwrap();
         assert_eq!(after.state, WorkState::Admitted);
         assert_eq!(after.result, None);
+    }
+
+    /// A fresh work-store path under a per-test temp directory.
+    /// (No `tempfile` dependency in this crate; a pid-and-name
+    /// directory under the system temp dir is enough, and each
+    /// test removes its own afterwards.)
+    fn temp_work(test: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("gaia-work-{}-{test}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("work.jsonl");
+        let _ = std::fs::remove_file(&path);
+        (dir, path)
+    }
+
+    fn line_count(path: &Path) -> usize {
+        std::fs::read_to_string(path)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn work_record_json_round_trips_result_presence_exactly() {
+        let pending = WorkRecord {
+            id: "work-000001".to_string(),
+            intent: intent(None),
+            state: WorkState::AwaitingVerdict,
+            result: None,
+        };
+        assert_eq!(WorkRecord::from_json(&pending.to_json()), Some(pending));
+        // A completed record whose result is JSON null is
+        // `Some(null)`, not `None` — the distinction survives.
+        let done_null = WorkRecord {
+            id: "work-000002".to_string(),
+            intent: intent_seq(Some(Verdict::Admit), 43),
+            state: WorkState::Executed,
+            result: Some(json!(null)),
+        };
+        assert_eq!(done_null.to_json()["state"], json!("executed"));
+        assert_eq!(done_null.to_json()["intent"]["verdict"], json!("admit"));
+        assert_eq!(
+            WorkRecord::from_json(&done_null.to_json()),
+            Some(done_null)
+        );
+        assert_eq!(WorkRecord::from_json(&json!({"nope": true})), None);
+    }
+
+    #[test]
+    fn file_store_open_fold_round_trip_with_verdict_completion_and_provenance() {
+        let (dir, path) = temp_work("fold-roundtrip");
+        let result = json!({
+            "restarted": true,
+            "spine_event_refs": [{ "hash": "hash-two", "seq": 12 }],
+        });
+        let expected = {
+            let mut store = FileWorkStore::open(&path).unwrap();
+            assert!(store.records().is_empty());
+            assert!(store.load_failures().is_empty());
+            assert_eq!(store.path(), path.as_path());
+            let escalated = store.submit(intent_seq(None, 42)).unwrap();
+            store
+                .record_verdict(&escalated.id, Verdict::Admit)
+                .unwrap();
+            let done = store.complete(&escalated.id, result.clone()).unwrap();
+            let rejected = store.submit(intent_seq(Some(Verdict::Reject), 43)).unwrap();
+            // submit + verdict + complete + submit: four lines.
+            assert_eq!(line_count(&path), 4);
+            vec![done, rejected]
+        };
+        let reopened = FileWorkStore::open(&path).unwrap();
+        assert_eq!(reopened.records(), expected);
+        assert!(reopened.load_failures().is_empty());
+        let done = &expected[0];
+        assert_eq!(done.state, WorkState::Executed);
+        assert_eq!(done.intent.verdict, Some(Verdict::Admit));
+        let body = done.status_body();
+        assert_eq!(body["result"], result);
+        assert_eq!(
+            body["provenance"]["spine_event_refs"],
+            json!([{ "hash": "hash-two", "seq": 12 }])
+        );
+        assert_eq!(body["provenance"]["si_journal_seqs"], json!([42]));
+        // The next-id counter was rebuilt past the folded ids.
+        let mut reopened = reopened;
+        let next = reopened.submit(intent_seq(Some(Verdict::Admit), 44)).unwrap();
+        assert_eq!(next.id, "work-000003");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_dedup_after_reopen_spends_no_id_and_appends_nothing() {
+        let (dir, path) = temp_work("dedup-reopen");
+        let first = {
+            let mut store = FileWorkStore::open(&path).unwrap();
+            store.submit(intent(Some(Verdict::Admit))).unwrap()
+        };
+        let mut reopened = FileWorkStore::open(&path).unwrap();
+        let duplicate = reopened.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(duplicate, first);
+        assert_eq!(reopened.records().len(), 1);
+        assert_eq!(line_count(&path), 1, "a dedup hit appends nothing");
+        let next = reopened.submit(intent_seq(Some(Verdict::Admit), 43)).unwrap();
+        assert_eq!(next.id, "work-000002", "the duplicate burned no id");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_claim_appends_nothing() {
+        let (dir, path) = temp_work("claim-no-append");
+        let mut store = FileWorkStore::open(&path).unwrap();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(line_count(&path), 1);
+        let claimed = store.claim_for_actuation(&rec.id).unwrap();
+        assert_eq!(claimed.state, WorkState::Admitted);
+        assert_eq!(line_count(&path), 1, "claim changes and appends nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_torn_final_line_is_skipped_counted_and_store_usable() {
+        let (dir, path) = temp_work("torn-line");
+        {
+            let mut store = FileWorkStore::open(&path).unwrap();
+            store.submit(intent(Some(Verdict::Admit))).unwrap();
+        }
+        // A crash mid-append leaves a truncated final line.
+        {
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            write!(file, "{{\"id\":\"work-0000").unwrap();
+        }
+        let mut reopened = FileWorkStore::open(&path).unwrap();
+        assert_eq!(reopened.records().len(), 1);
+        assert_eq!(reopened.load_failures().len(), 1);
+        assert!(
+            reopened.load_failures()[0].contains('2'),
+            "the failure names its 1-based line: {:?}",
+            reopened.load_failures()
+        );
+        let next = reopened.submit(intent_seq(Some(Verdict::Admit), 43)).unwrap();
+        assert_eq!(next.id, "work-000002");
+        assert_eq!(reopened.records().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_verdict_after_reopen_conflict_is_still_409() {
+        let (dir, path) = temp_work("verdict-reopen-conflict");
+        let rec = {
+            let mut store = FileWorkStore::open(&path).unwrap();
+            let rec = store.submit(intent(None)).unwrap();
+            store.record_verdict(&rec.id, Verdict::Admit).unwrap();
+            rec
+        };
+        let mut reopened = FileWorkStore::open(&path).unwrap();
+        let err = reopened.record_verdict(&rec.id, Verdict::Reject).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert_eq!(err.status(), 409);
+        assert_eq!(
+            reopened.get(&rec.id).unwrap().state,
+            WorkState::Admitted,
+            "the refused verdict changed nothing"
+        );
+        assert_eq!(line_count(&path), 2, "the refused verdict appended nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_journal_seq_conflict_line_is_a_load_failure() {
+        let (dir, path) = temp_work("seq-conflict");
+        let first = WorkRecord {
+            id: "work-000001".to_string(),
+            intent: intent_seq(Some(Verdict::Admit), 42),
+            state: WorkState::Admitted,
+            result: None,
+        };
+        let conflicting = WorkRecord {
+            id: "work-000002".to_string(),
+            intent: intent_seq(Some(Verdict::Admit), 42),
+            state: WorkState::Admitted,
+            result: None,
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", first.to_json(), conflicting.to_json()),
+        )
+        .unwrap();
+        let store = FileWorkStore::open(&path).unwrap();
+        assert_eq!(store.records(), vec![first]);
+        assert_eq!(store.load_failures().len(), 1);
+        assert!(store.load_failures()[0].contains('2'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_append_failure_rolls_back_submit_and_spends_no_id() {
+        let (dir, path) = temp_work("append-failure");
+        let nested = dir.join("blocker").join("work.jsonl");
+        // Open while the parent does not exist (a missing file
+        // is an empty store), then put a regular file where
+        // the parent directory would have to be: the append
+        // behind `submit` now has nowhere to go.
+        let mut store = FileWorkStore::open(&nested).unwrap();
+        std::fs::write(dir.join("blocker"), "not a directory").unwrap();
+        let err = store.submit(intent(Some(Verdict::Admit))).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_work_store_io");
+        assert_eq!(err.status(), 500);
+        assert!(store.records().is_empty(), "the change was rolled back");
+        assert_eq!(store.get("work-000001"), None);
+        // Unblocked, the same submission takes the id the
+        // failed attempt would have burned — it spent none.
+        std::fs::remove_file(dir.join("blocker")).unwrap();
+        let ok = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(ok.id, "work-000001");
+        assert_eq!(store.records().len(), 1);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_store_open_with_carried_classes_uses_the_given_set() {
+        let (dir, path) = temp_work("carried-classes");
+        let mut store =
+            FileWorkStore::open_with_carried_classes(&path, ["external".to_string()]).unwrap();
+        let ok = store
+            .submit(intent_in_class(Some(Verdict::Admit), "external"))
+            .unwrap();
+        assert_eq!(ok.state, WorkState::Admitted);
+        let err = store.submit(intent_seq(Some(Verdict::Admit), 43)).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_class_not_carried");
+        assert_eq!(line_count(&path), 1, "a refused class appends nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

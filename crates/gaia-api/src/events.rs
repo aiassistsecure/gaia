@@ -20,6 +20,27 @@
 //! For `si` events `collection`/`row` are SI's own; for `hearth`
 //! events `collection` is `"spine"` and `row` is the full spine
 //! event (`model`, `kind`, `facts`, `seq`, `hash`, `ts`).
+//!
+//! ## Combined subscriptions (G-4b)
+//!
+//! A single-source subscription is the legacy shape above,
+//! unchanged: bare `id: <seq>`, a bare numeric `Last-Event-ID`,
+//! and one cursor in that source's space. A subscription naming
+//! **two** sources is combined, and its wire ids are
+//! source-qualified pairs (G-9's rule — cross-references are
+//! explicit source-qualified pairs, never a merged sequence):
+//! `id: hearth:<seq>` / `id: si:<seq>`, produced only by
+//! [`StreamEvent::sse_block_qualified`]. Event names and `data:`
+//! are unchanged (the data already carries `source` + `seq`).
+//! Resume for a combined subscription is likewise qualified:
+//! the composite `Last-Event-ID` grammar is
+//! `hearth:<seq>,si:<seq>` (either order, both required), and
+//! the query form pairs each `since`/`after` cursor with the
+//! `source` named before it. The full scheme — composite header,
+//! query pairing, per-source resync, and replay order — is
+//! defined in [`crate::sse`]'s module docs. The two sequence
+//! spaces are still never merged: a qualified id is a pair of
+//! independent cursors, not a position in a joint space.
 
 use std::collections::HashSet;
 
@@ -124,6 +145,25 @@ impl StreamEvent {
         )
     }
 
+    /// One complete SSE block with a source-qualified id —
+    /// `id: <source>:<seq>` — used **only** by combined
+    /// (two-source) serving in `crate::sse`. The legacy
+    /// [`StreamEvent::sse_block`] is unchanged and remains the
+    /// only block a single-source subscription ever emits.
+    /// Event name and data are identical to the legacy block;
+    /// only the `id:` line is qualified, because in combined
+    /// mode a bare seq would be ambiguous between the two
+    /// sequence spaces (G-2 §4.2, G-9).
+    pub fn sse_block_qualified(&self) -> String {
+        format!(
+            "id: {}:{}\nevent: {}\ndata: {}\n\n",
+            self.source.as_str(),
+            self.seq,
+            self.wire_name(),
+            self.data_json()
+        )
+    }
+
     /// Build the event for a spine event read out of `hearth-store`.
     pub fn from_spine(ev: &hearth_store::Event) -> StreamEvent {
         StreamEvent {
@@ -166,9 +206,15 @@ impl StreamEvent {
             facts: row.clone(),
             collection: collection.to_string(),
             row_kind: row.get("kind").and_then(Value::as_str).map(str::to_string),
+            // Spine events carry `ts`; SI rows may too. Populate
+            // it from a numeric `row["ts"]` when present so
+            // combined replay can compare timestamps across
+            // sources when both sides actually record one.
+            // A non-numeric or absent `ts` stays `None` — no
+            // timestamp is invented for a row that has none.
+            ts: row.get("ts").and_then(Value::as_f64),
             row,
             hash: None,
-            ts: None,
         }
     }
 }
@@ -303,6 +349,51 @@ mod tests {
         assert_eq!(data["collection"], json!("self_edits"));
         assert_eq!(data["row"]["kind"], json!("tool"));
         assert_eq!(data["task"], json!("3"));
+    }
+
+    #[test]
+    fn qualified_block_qualifies_only_the_id_line() {
+        let ev = si_event();
+        let q = ev.sse_block_qualified();
+        assert!(q.starts_with("id: si:7\nevent: si:self_edit.tool\n"), "{q}");
+        // Legacy block is untouched, and the qualified block's
+        // event/data lines are identical to the legacy ones.
+        assert!(ev.sse_block().starts_with("id: 7\n"));
+        assert_eq!(
+            q.split('\n').skip(1).collect::<Vec<_>>(),
+            ev.sse_block().split('\n').skip(1).collect::<Vec<_>>()
+        );
+        let h = StreamEvent::from_si(1, "x", "c", json!({}));
+        let mut h = h;
+        h.source = Source::Hearth;
+        assert!(h.sse_block_qualified().starts_with("id: hearth:1\n"));
+    }
+
+    #[test]
+    fn from_si_populates_ts_only_from_a_numeric_row_ts() {
+        let with = StreamEvent::from_si(
+            9,
+            "task_open",
+            "tasks",
+            json!({"kind": "task", "ts": 1725.5}),
+        );
+        assert_eq!(with.ts, Some(1725.5));
+        let int_ts = StreamEvent::from_si(
+            10,
+            "task_open",
+            "tasks",
+            json!({"kind": "task", "ts": 1725}),
+        );
+        assert_eq!(int_ts.ts, Some(1725.0));
+        let absent = si_event();
+        assert_eq!(absent.ts, None);
+        let non_numeric = StreamEvent::from_si(
+            11,
+            "task_open",
+            "tasks",
+            json!({"kind": "task", "ts": "1725"}),
+        );
+        assert_eq!(non_numeric.ts, None);
     }
 
     #[test]

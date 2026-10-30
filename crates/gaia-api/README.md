@@ -90,19 +90,48 @@ Status answers carry the provenance the work arrived with:
 }
 ```
 
+## Work-store persistence (G-4b)
+
+The store behind these routes has two implementations of one
+`WorkStore` trait. `MemoryWorkStore` is the test/ephemeral one.
+`FileWorkStore` is the durable one the `gaia` binary wires by
+default (at `work.jsonl` beside the other stores): every
+state-changing transition appends a full-record JSONL snapshot
+(append + flush before the change is believed), and opening the
+file folds the snapshots back into records — first-seen order,
+later snapshot wins. Work records, verdicts, results, provenance,
+and the S-1 `journal_seq` dedup index all survive a restart; a
+duplicate submission after a restart returns the same `work_id`
+and actuates nothing new. A torn final line after a crash is
+skipped and counted in `load_failures`, never fatal.
+
+## Combined event subscriptions (G-4b)
+
+`GET /gaia/v1/events` follows one source by default, as it always
+has (`?source=hearth` or `?source=si`, bare `id: <seq>`, bare
+`Last-Event-ID`). Naming both — `?source=hearth&source=si` —
+opens a **combined** subscription on one connection. The two
+journals' sequence spaces are never merged: combined wire ids are
+source-qualified (`id: hearth:<seq>`, `id: si:<seq>`), and resume
+carries both cursors explicitly — either paired in the query
+(`?source=hearth&since=1234&source=si&since=987`) or in a single
+header, `Last-Event-ID: hearth:1234,si:987`. A bare numeric header
+on a combined request is refused (400): it cannot name two
+cursors, and the ambiguity is never guessed at. Live-tail order
+on a combined subscription is true hub arrival order; replay is
+per-source sequence order, and its cross-source interleaving is
+a presentation order that makes no causal claim (the journals
+share no clock and no counter).
+
 ## What is NOT here yet
 
-This is the skeleton slice (G-3), and it says so plainly:
-
-- **In-memory only.** The store behind these routes lives and dies
-  with the process. Persistence on the spine is a later slice (G-4).
-- **No SSE.** `GET /gaia/v1/events` — the journal-derived event
-  stream — is designed in G-2 §4 and not served by this crate yet.
-- **No actuation execution.** The verdict state machine is real, and
-  an actuator seam exists in `work`, but no tool is executed by this
-  crate. Wiring actuation to the runtime is a later slice (G-6).
-- **No `/gaia/v1/residency` yet.** Structured residency for policy
-  consumers is likewise a later slice.
+This surface began as the skeleton slice (G-3), and it says so
+plainly about what is still missing:
+- **No authentication.** Loopback is the entire security model
+  (see below); nothing on this surface verifies a caller.
+- **Actuation lives in `gaia-serve`, not here.** This crate carries
+  the verdict state machine and the actuator seam; the runtime
+  executes admitted work in the composition crate (G-6).
 
 ## Design
 

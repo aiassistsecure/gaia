@@ -9,8 +9,12 @@
 //! [`work`] for the lifecycle they move through.
 //!
 //! G-3 built the transport — submission, status, and verdict — and
-//! the verdict state machine it carries; the store behind those
-//! routes is in-memory and dies with the process. G-4 adds the
+//! the verdict state machine it carries. G-4b gives the store a
+//! durable backing ([`work::FileWorkStore`], JSONL snapshots folded
+//! on open; the in-memory store remains the test/ephemeral
+//! implementation behind the same trait), and lets one events
+//! subscription follow both sources at once with source-qualified
+//! ids and per-source resume. G-4 adds the
 //! event stream: [`events`] is the shared two-source vocabulary,
 //! [`mirror`] is the hash-checked cache of the spine the `hearth`
 //! source is served from, and [`sse`] is the server —
@@ -48,6 +52,6 @@ pub use leash::{LeashAck, LeashHeartbeatMsg, LeashRecordMsg, LeashSink};
 pub use mirror::MirrorStore;
 pub use sse::{EventHub, EventsConfig, EventsServer, SiEventBuffer};
 pub use work::{
-    run_actuation, Actuator, GaiaError, Intent, MemoryWorkStore, Verdict, WorkRecord, WorkState,
-    WorkStore,
+    run_actuation, Actuator, FileWorkStore, GaiaError, Intent, MemoryWorkStore, Verdict,
+    WorkRecord, WorkState, WorkStore,
 };

@@ -57,7 +57,20 @@ not a restart — it is a **proposal**.
   (default `GAIA_PORT` or 11435).
 - `GET /gaia/v1/events` (SSE) on its own listener,
   `--events-port` (default agency port + 1), with its own
-  connection budget — never the inference pool.
+  connection budget — never the inference pool. One connection
+  may follow both sources (`?source=hearth&source=si`): wire ids
+  are then source-qualified (`id: hearth:<seq>`, `id: si:<seq>`)
+  and resume carries both cursors (`Last-Event-ID:
+  hearth:<seq>,si:<seq>`); single-source streams keep the bare
+  id shape they have always had.
+
+The work store is file-backed (G-4b): `work.jsonl`, beside
+`proposals.jsonl` / `outcomes.jsonl` / `egress.jsonl` under the
+same home. Submissions, verdicts, results, and the submission
+dedup index survive a restart — a retried submission after a
+restart returns the existing record instead of minting a second
+work order. The in-memory store remains available to tests and
+embedders behind the same trait; the binary does not use it.
 
 ## Running
 
