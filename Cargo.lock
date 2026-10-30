@@ -370,6 +370,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gaia-serve"
+version = "0.4.7"
+dependencies = [
+ "gaia-api",
+ "hearth-api",
+ "hearth-core",
+ "hearth-serve",
+ "hearth-store",
+ "libc",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

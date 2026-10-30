@@ -1,0 +1,28 @@
+[package]
+name = "gaia-serve"
+description = "The gaia composition: supervisor loop, residency watcher, and agency serving for the gaia fork. It observes and proposes; actuation arrives only as gate-admitted intents (G-6)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["gaia", "agency", "supervisor", "residency", "proposals"]
+categories = ["command-line-utilities", "network-programming"]
+documentation = "https://docs.rs/gaia-serve"
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+gaia-api = { path = "../gaia-api" }
+hearth-api = { path = "../hearth-api", version = "0.4.7" }
+hearth-core = { path = "../hearth-core", version = "0.4.7" }
+hearth-serve = { path = "../hearth-serve", version = "0.4.7" }
+hearth-store = { path = "../hearth-store", version = "0.4.7" }
+serde_json = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "gaia"
+path = "src/main.rs"

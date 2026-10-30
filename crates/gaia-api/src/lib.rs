@@ -16,13 +16,16 @@
 //! source is served from, and [`sse`] is the server —
 //! `GET /gaia/v1/events` on its own listener with its own
 //! connection budget, per-source `Last-Event-ID` resume, filtered
-//! subscriptions, resync-on-overflow, and heartbeats. There is
-//! still no `/gaia/v1/residency` and no tool is executed here —
-//! actuation is G-6.
+//! subscriptions, resync-on-overflow, and heartbeats. G-5 adds
+//! [`residency`]: `GET /gaia/v1/residency`, the structured state
+//! (enum + `lost_reason`) a policy consumer reads, where
+//! upstream's `/residency` renders only the human string. No
+//! tool is executed here — actuation is G-6.
 
 pub mod events;
 pub mod gateway;
 pub mod mirror;
+pub mod residency;
 pub mod sse;
 pub mod work;
 
