@@ -41,14 +41,30 @@
 //! [`OutcomeStore`] and returned as the work's result. The
 //! composition proposes; the gate decides; this crate acts
 //! only on the decision, never in place of it.
+//!
+//! Proposals also have somewhere to go. The seam egress
+//! (S-2b, G-9 §8) is a separate pass —
+//! [`Composition::egress_pass`], driven by the same ticker
+//! that steps this composition — which POSTs every proposal
+//! SI has not yet ACKed to SI's proposal ingest and records
+//! the disposition (acked / rejected / escalated / failed)
+//! in the file-backed [`EgressStore`]. The pass is
+//! deliberately *not* part of `tick_once`: observation must
+//! not fail because SI is down, and an un-ACKed proposal is
+//! simply re-sent on a later pass — SI's dedup by
+//! `caused_by` makes the retry free (G-9 §8.3).
 
 pub mod actuate;
+pub mod egress;
+pub mod egress_client;
 pub mod leash;
 pub mod outcomes;
 pub mod proposals;
 pub mod watcher;
 
 pub use actuate::FleetActuator;
+pub use egress::{drive_egress, Disposition, EgressPass, EgressRecord, EgressStore};
+pub use egress_client::{Ack, GateVerdict, HttpProposalSink, ProposalSink, SendOutcome};
 pub use leash::{Leash, LeashKind, LeashRecord};
 pub use outcomes::{Outcome, OutcomeRecord, OutcomeStore};
 pub use proposals::{Proposal, ProposalStore};
@@ -141,6 +157,19 @@ pub struct Composition {
     /// relative `./blobs` with progress off — library-quiet;
     /// the binary points it at its home directory.
     pull_cfg: PullConfig,
+    /// S-2b seam egress state (G-9 §8.4): the record of which
+    /// proposals SI has answered, and how. Ephemeral until the
+    /// binary installs the file-backed store under its home
+    /// ([`Composition::set_egress_store`]) — restart-safe retry
+    /// depends on the file, exactly as dedup depends on the
+    /// proposal store's file.
+    egress: EgressStore,
+    /// The transport proposals are sent over. `None` until the
+    /// binary installs one ([`Composition::set_egress_sink`]):
+    /// a composition with no sink configured sends nothing and
+    /// its proposals accumulate un-ACKed, which is the honest
+    /// posture for "SI's ingest is not wired here" (G-9 §13.1).
+    egress_sink: Option<Box<dyn ProposalSink + Send>>,
 }
 
 impl Composition {
@@ -165,6 +194,8 @@ impl Composition {
                 progress: false,
                 verify_existing: false,
             },
+            egress: EgressStore::ephemeral(),
+            egress_sink: None,
         }
     }
 
@@ -275,6 +306,52 @@ impl Composition {
     /// Every actuation outcome recorded so far, oldest first.
     pub fn outcomes(&self) -> &[OutcomeRecord] {
         self.outcomes.outcomes()
+    }
+
+    /// Install the file-backed egress store (the binary opens
+    /// it under its home). Until then the store is ephemeral,
+    /// and a restart would forget which proposals SI answered
+    /// — re-sending them all, which SI's dedup absorbs but the
+    /// operator should not have to rely on.
+    pub fn set_egress_store(&mut self, egress: EgressStore) {
+        self.egress = egress;
+    }
+
+    /// Install the seam egress transport (the binary builds an
+    /// [`HttpProposalSink`] from its `--si-addr` flag). Until
+    /// then [`Composition::egress_pass`] sends nothing.
+    pub fn set_egress_sink(&mut self, sink: Box<dyn ProposalSink + Send>) {
+        self.egress_sink = Some(sink);
+    }
+
+    /// The egress store: which proposals SI has answered, and
+    /// how, in the order the answers were recorded.
+    pub fn egress(&self) -> &EgressStore {
+        &self.egress
+    }
+
+    /// One seam-egress pass (S-2b, G-9 §8.4): offer every
+    /// proposal that has no terminal egress record to the
+    /// sink, in proposal order, and record each answer.
+    ///
+    /// With no sink installed the pass is a no-op that reports
+    /// zeros — "not configured" is a deployment fact, not an
+    /// error, and the ticker should not log it as one. A store
+    /// error (an ACK arrived but could not be recorded)
+    /// propagates: the pass stops rather than claim answers
+    /// the record does not hold, and the next pass re-sends —
+    /// SI's `caused_by` dedup returns the identical ACK, so
+    /// the re-send is free and the record heals.
+    pub fn egress_pass(&mut self) -> Result<EgressPass, String> {
+        let Some(sink) = &self.egress_sink else {
+            return Ok(EgressPass::default());
+        };
+        // The proposal list is cloned so the drive can borrow
+        // the egress store mutably while iterating it; the
+        // list is small (one entry per observed loss) and the
+        // clone is the honest price of the split.
+        let proposals = self.proposals.proposals().to_vec();
+        drive_egress(&proposals, &mut self.egress, sink.as_ref())
     }
 
     /// Act on one work order — the G-6 drain step.

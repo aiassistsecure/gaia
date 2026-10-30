@@ -109,3 +109,34 @@ refuses it before an actuator exists. The evidence base is
 miniature fleets (a python stand-in child in the acceptance
 tests), not a production fleet. Performance is unmeasured
 (G-8).
+
+## Seam egress (S-2b)
+
+Proposals used to terminate at `proposals.jsonl`. With
+`--si-addr HOST:PORT` (or `GAIA_SI_ADDR`) set, the ticker
+also runs an egress pass after every step: each proposal
+SI has not yet answered is POSTed to SI's proposal ingest
+(`POST /gaia/proposals`, G-9 §8 — the proposal record
+verbatim), and SI's answer is recorded in `egress.jsonl`,
+a JSONL store beside the other stores. A proposal's
+disposition is `pending` until a terminal answer is
+recorded: `acked` (the gate admitted it), `rejected`,
+`escalated` — each carrying the ACK's `journal_seq`, the
+self-edit row in SI's journal the proposal became — or
+`failed` (SI answered 4xx: a terminal shape refusal,
+recorded, never retried blindly). Transport failures and
+5xx answers record nothing; the proposal stays pending
+and is re-sent on a later pass, and SI's dedup by
+`caused_by` returns the identical ACK, so retries are
+free and a restart re-sends exactly the un-ACKed set.
+
+What this is not: the other half of the seam. The ingest
+endpoint itself is SI-side work (S-2a); the acceptance
+tests here prove the fork half against a stub that
+implements the §8.3 contract — dedup, ACK-after-journal,
+verdict spellings — and claim nothing about the real SI
+service. Nothing actuates through the seam yet: an ACKed
+proposal is provenance, not a work submission (that is
+S-3). There is no authentication anywhere — loopback is
+the entire security model, as everywhere in this binary
+(G-9 §14). Performance is unmeasured.
