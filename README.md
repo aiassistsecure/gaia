@@ -1,3 +1,9 @@
+> **This repository is Gaia** — a fork of [Hearth](https://github.com/aiassistsecure/hearth)
+> that carries the agentic harness/loop and SSE event spine on Hearth's runtime-manager
+> layer ("Hearth becomes Gaia"). Everything below is Hearth's own README, kept as-is from
+> upstream. For what Gaia is, the upstream-sync runbook, and the fork baseline, see
+> [docs/GAIA.md](docs/GAIA.md).
+
 # hearth
 
 **Deterministic model residency.** Keep declared models warm, and tell the truth about which ones are.
