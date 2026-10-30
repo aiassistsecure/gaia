@@ -37,7 +37,7 @@ not a restart — it is a **proposal**.
   intent (`{type:"tool", tool, args, reason}`) plus its causal
   provenance — the spine `EventRef` of the loss it answers.
   Whether it runs is the SI gate's decision, journaled in SI
-  before any actuation. Actuation itself is slice G-6.
+  before any actuation.
 - **Dedup is causal and durable.** A loss that already has a
   proposal recorded against its event ref is answered; a
   second watcher pass — or a restarted process over the same
@@ -75,5 +75,37 @@ estimate (it is stated here rather than hidden). The binary
 supervises llama.cpp/GGUF models; vLLM declarations are
 upstream's composition for now.
 
-Nothing here executes a tool intent. Performance is
-unmeasured (G-8).
+## Actuation (G-6)
+
+The ticker drains the work store after every step: each
+record in `Admitted` state — an intent SI's gate has
+admitted, and no other kind — is handed to
+`Composition::actuate_work`, which executes its journaled
+args verbatim through the §5.3 primitives:
+
+- `hearth.restart` → `Supervisor::start(stored spec)` — the
+  spec this composition started the model with, remembered
+  via `note_spec`. No stored spec, no restart: a refusal.
+- `hearth.stop` → `Supervisor::stop(model)`.
+- `hearth.repull` → `hearth_pull::pull`, which records
+  `PullStarted`/`PullCompleted` in the spine itself.
+- `hearth.notify` → an outcome record; no process action.
+
+Two checks stand in front of every process actuation, in
+this order: the **leash** (a stop SI journaled and has not
+resumed, held in `leash.jsonl` — §5.2.1) and the
+**stale-state check** (the fleet has moved on since the
+proposal: the model recovered, or the intent answers a loss
+that is no longer the latest event). A failed check is a
+*refusal*: recorded in `outcomes.jsonl`, returned as the
+work's result, never executed. Every outcome — executed,
+refused, failed — is recorded the same way, with the spine
+refs it produced and the loss it answers.
+
+What this is not: the gate. Verdicts are SI's; this crate
+carries and honours them, it does not make them. A rejected
+or never-verdicted intent actuates nothing — the claim
+refuses it before an actuator exists. The evidence base is
+miniature fleets (a python stand-in child in the acceptance
+tests), not a production fleet. Performance is unmeasured
+(G-8).

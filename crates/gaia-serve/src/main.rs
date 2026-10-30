@@ -26,14 +26,19 @@
 //! shape, and this file must not trip its own scan by quoting
 //! the thing it refuses to do. Losses observed here become
 //! proposals recorded by the watcher; whether a proposal is
-//! ever acted on is the SI gate's decision, journaled in SI
-//! (actuation is G-6, not this slice).
+//! ever acted on is the SI gate's decision, journaled in SI —
+//! and since G-6, the ticker also drains the work store after
+//! each step, handing every ADMIT-ted record to
+//! [`gaia_serve::Composition::actuate_work`]. The gate's
+//! decision is the only path from observation to action, and
+//! this loop is where that path is walked.
 //!
 //! Three listeners/loops, three separate concerns:
 //!
 //!   * The **ticker** (500 ms) steps the composition: probe,
-//!     mirror, propose. It also owns shutdown, because it is
-//!     the loop that can stop children and record it cleanly.
+//!     mirror, propose, then act on admitted work. It also
+//!     owns shutdown, because it is the loop that can stop
+//!     children and record it cleanly.
 //!   * The **agency listener** (`--port`) answers the gaia
 //!     work routes and the structured residency route. It holds
 //!     no inference proxying of its own in this composition —
@@ -55,8 +60,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gaia_serve::{Composition, ProposalStore, SharedMirror, Watcher};
+use gaia_serve::{Composition, Leash, OutcomeStore, ProposalStore, SharedMirror, Watcher};
 use hearth_core::{Budget, Declared};
+use hearth_pull::PullConfig;
 use hearth_serve::server::{free_port, ServerSpec};
 use hearth_serve::Supervisor;
 use hearth_store::Spine;
@@ -224,7 +230,8 @@ fn parse_args() -> Args {
 }
 
 /// The ticker: step the composition every 500 ms, report what
-/// each step actually did, and own shutdown.
+/// each step actually did, drain admitted work, and own
+/// shutdown.
 ///
 /// The counts logged are the [`gaia_serve::TickOutcome`]'s own
 /// counts, read off the struct — a line that says "2
@@ -236,7 +243,20 @@ fn parse_args() -> Args {
 ///
 /// The boundary, again, in the code that embodies it: this
 /// loop calls `tick_once` only. See the module docs.
-fn ticker_loop(comp: Arc<Mutex<Composition>>) {
+///
+/// The drain (G-6): after each step, the work store's records
+/// are scanned for `Admitted` ones and each is handed to
+/// [`Composition::actuate_work`]. A record the gate has not
+/// admitted is never in the scan's output — the claim inside
+/// `actuate_work` re-checks regardless, so the scan is a
+/// finding aid, not the gate. Lock order is composition →
+/// work store wherever both are held; the agency handler
+/// takes the two locks in sequence, never nested, so no
+/// cycle exists.
+fn ticker_loop(
+    comp: Arc<Mutex<Composition>>,
+    work_store: Arc<Mutex<gaia_api::MemoryWorkStore>>,
+) {
     loop {
         std::thread::sleep(Duration::from_millis(500));
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -272,6 +292,42 @@ fn ticker_loop(comp: Arc<Mutex<Composition>>) {
             // going: one bad poll must not end supervision of
             // every other model on the box.
             Err(e) => eprintln!("gaia: tick failed: {e}"),
+        }
+
+        // The drain. The scan is taken and released before any
+        // actuation: actuation can be slow (a re-pull moves
+        // bytes), and the agency listener must not wait on the
+        // store lock for its duration.
+        let admitted: Vec<String> = {
+            let store = work_store.lock().unwrap_or_else(|p| p.into_inner());
+            store
+                .records()
+                .into_iter()
+                .filter(|r| r.state == gaia_api::WorkState::Admitted)
+                .map(|r| r.id)
+                .collect()
+        };
+        for id in admitted {
+            let acted = {
+                let mut guard = comp.lock().unwrap_or_else(|p| p.into_inner());
+                let mut store = work_store.lock().unwrap_or_else(|p| p.into_inner());
+                guard.actuate_work(&mut *store, &id)
+            };
+            match acted {
+                Ok(rec) => {
+                    let outcome = rec
+                        .result
+                        .as_ref()
+                        .and_then(|r| r["outcome"].as_str())
+                        .unwrap_or("unknown");
+                    eprintln!("gaia: work {} acted on — outcome {outcome}", rec.id);
+                }
+                // A claim that races a verdict or an actuator
+                // that cannot read its args: reported, and the
+                // loop keeps going — one bad work order must
+                // not end supervision either.
+                Err(e) => eprintln!("gaia: work {id} not acted on: {e}"),
+            }
         }
     }
 }
@@ -395,6 +451,29 @@ fn main() {
     let supervisor = Supervisor::new(spine, budget, declared);
     let mut comp = Composition::new(supervisor, mirror, watcher, proposals, hub);
 
+    // The G-6 stores, file-backed under the same home as the
+    // spine and the proposals: actuation outcomes and the
+    // operator leash are records a restart must not lose —
+    // the leash most of all, since a stop SI journaled must
+    // still be in force after this process restarts, or the
+    // restart it forbids happens behind the operator's back.
+    comp.set_outcome_store(
+        OutcomeStore::open(&home.join("outcomes.jsonl"))
+            .unwrap_or_else(|e| fail(format!("opening outcome store: {e}"))),
+    );
+    comp.set_leash(
+        Leash::open(&home.join("leash.jsonl"))
+            .unwrap_or_else(|e| fail(format!("opening leash: {e}"))),
+    );
+    // Re-pulls land in <home>/blobs, upstream's `cmd_pull`
+    // default; progress off because this binary's stderr is a
+    // log, not a terminal.
+    comp.set_pull_config(PullConfig {
+        blobs_dir: home.join("blobs"),
+        progress: false,
+        verify_existing: false,
+    });
+
     // Start each declared model. A refusal is not a crash —
     // mirror upstream's `cmd_up`: say it and keep going, because
     // the rest of the fleet is still worth serving, and the
@@ -410,6 +489,11 @@ fn main() {
         let mut spec = ServerSpec::new(name, path, port);
         spec.binary = args.binary.clone();
         spec.log_dir = log_dir.clone();
+        // The composition remembers the spec it started the
+        // model with: an admitted restart (G-6) re-runs
+        // exactly this spec, and one it never noted cannot be
+        // restart-actuated at all.
+        comp.note_spec(spec.clone());
         match comp.supervisor().start(spec) {
             Ok(()) => eprintln!("gaia: {name} loading on 127.0.0.1:{port}"),
             Err(e) => eprintln!("gaia: {name} not started — {e}"),
@@ -439,11 +523,12 @@ fn main() {
     let comp = Arc::new(Mutex::new(comp));
     let work_store = Arc::new(Mutex::new(gaia_api::MemoryWorkStore::new()));
 
-    // The ticker thread: the composition loop, and the owner of
-    // shutdown (see ticker_loop).
+    // The ticker thread: the composition loop, the actuation
+    // drain, and the owner of shutdown (see ticker_loop).
     {
         let comp = Arc::clone(&comp);
-        std::thread::spawn(move || ticker_loop(comp));
+        let work_store = Arc::clone(&work_store);
+        std::thread::spawn(move || ticker_loop(comp, work_store));
     }
 
     eprintln!(

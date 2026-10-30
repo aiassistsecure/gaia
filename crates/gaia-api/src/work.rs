@@ -288,6 +288,13 @@ impl MemoryWorkStore {
     fn find_mut(&mut self, id: &str) -> Option<&mut WorkRecord> {
         self.records.iter_mut().find(|r| r.id == id)
     }
+
+    /// Every record in the store, in submission order — the drain's view:
+    /// a caller (the composition's ticker) scans it for Admitted records
+    /// to act on. Cloned, like `get`, so the scan never borrows the store.
+    pub fn records(&self) -> Vec<WorkRecord> {
+        self.records.clone()
+    }
 }
 
 impl Default for MemoryWorkStore {
@@ -494,6 +501,39 @@ mod tests {
         // And get round-trips what submit returned.
         assert_eq!(store.get(&escalated.id), Some(escalated));
         assert_eq!(store.get("work-000099"), None);
+    }
+
+    #[test]
+    fn records_returns_all_records_in_submission_order_with_their_states() {
+        let mut store = MemoryWorkStore::new();
+        let admitted = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let escalated = store.submit(intent(None)).unwrap();
+        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        store
+            .complete(&admitted.id, json!({ "restarted": true }))
+            .unwrap();
+
+        let records = store.records();
+        assert_eq!(
+            records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                admitted.id.as_str(),
+                escalated.id.as_str(),
+                rejected.id.as_str()
+            ]
+        );
+        assert_eq!(
+            records.iter().map(|r| r.state).collect::<Vec<_>>(),
+            vec![
+                WorkState::Executed,
+                WorkState::AwaitingVerdict,
+                WorkState::Rejected
+            ]
+        );
+        // Cloned, like `get`: mutating the scan changes nothing.
+        let mut scan = store.records();
+        scan.clear();
+        assert_eq!(store.records().len(), 3);
     }
 
     #[test]
