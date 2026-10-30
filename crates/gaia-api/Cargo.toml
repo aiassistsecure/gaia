@@ -1,0 +1,20 @@
+[package]
+name = "gaia-api"
+description = "The agency surface of the gaia fork — work submission, status, and verdict transport for journaled tool intents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["gaia", "agency", "gateway", "provenance", "tool-use"]
+categories = ["network-programming", "web-programming::http-server"]
+documentation = "https://docs.rs/gaia-api"
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+hearth-api = { path = "../hearth-api", version = "0.4.7" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+hearth-core = { path = "../hearth-core", version = "0.4.7" }

@@ -1,0 +1,719 @@
+//! The work lifecycle: submit, gate, act, record — and nothing more.
+//!
+//! A work order is an intent SI has *already journaled* on its side
+//! (G-2 §3.3). This module is the fork-side state machine for that
+//! order. It records what SI submitted, it records a verdict when
+//! one arrives, and it hands a record to an actuator only when an
+//! ADMIT verdict is on file. It never manufactures a verdict: an
+//! intent that arrives verdict-less waits in `awaiting_verdict`
+//! until the gate speaks, however long that takes.
+//!
+//! This is the G-3 skeleton store, and it is honest about being
+//! one. Records live in memory and die with the process. Nothing
+//! here is persisted to the spine — spine persistence is G-4, and
+//! [`WorkRecord::status_body`] says so in its own shape by
+//! returning an empty `spine_event_refs` list rather than refs
+//! that were never written. The store is the verdict state
+//! machine and nothing more: no policy, no gate checks, no
+//! judgement about whether an intent *should* be admitted. That
+//! stays in SI, where G-2 put it.
+
+use std::collections::HashSet;
+use std::fmt;
+
+use serde_json::{json, Value};
+
+/// The gate's decision on an intent, as delivered by SI.
+///
+/// The fork carries verdicts; it does not make them. A verdict
+/// reaches a record exactly one of two ways: attached to the
+/// submission (pre-admitted) or delivered later through
+/// [`WorkStore::record_verdict`] for an escalated intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Admit,
+    Reject,
+}
+
+impl Verdict {
+    /// Parse the wire spelling: `"admit"` or `"reject"`.
+    ///
+    /// Anything else is `None`, not a guess — a verdict string
+    /// this does not recognise is malformed input for the caller
+    /// to reject, never a verdict to round to the nearest one.
+    pub fn parse(s: &str) -> Option<Verdict> {
+        match s {
+            "admit" => Some(Verdict::Admit),
+            "reject" => Some(Verdict::Reject),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verdict::Admit => "admit",
+            Verdict::Reject => "reject",
+        }
+    }
+}
+
+/// An SI tool intent, as submitted, plus the gate bookkeeping the
+/// lifecycle needs.
+///
+/// `journal_seq` is the sequence in *SI's* journal at which SI
+/// recorded this intent before submitting it. It is provenance,
+/// quoted back in [`WorkRecord::status_body`]; it is not a spine
+/// sequence and the two are never mixed (G-2 §4.2). `class` is
+/// the tool class declared in the submission — which executor, if
+/// any, applies is a property of that declaration, never inferred
+/// by the fork. `verdict` is `None` for an escalated intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Intent {
+    pub tool: String,
+    pub args: Value,
+    pub reason: String,
+    pub task_id: String,
+    pub journal_seq: u64,
+    pub class: String,
+    pub verdict: Option<Verdict>,
+}
+
+/// Where a work order stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkState {
+    /// The 202 acknowledgement vocabulary of G-2 §3.2/§3.3: a
+    /// submission was recorded. Stored records never rest in this
+    /// state — `submit` resolves a record straight to `Admitted`,
+    /// `Rejected`, or `AwaitingVerdict` from the verdict the
+    /// intent carried in — but the spelling exists so the
+    /// transport layer can answer 202 with it.
+    Accepted,
+    /// Submitted verdict-less. Held until the gate's verdict is
+    /// delivered; cannot actuate.
+    AwaitingVerdict,
+    /// An ADMIT verdict is on record. The only state an actuator
+    /// may claim, and the only state `complete` accepts.
+    Admitted,
+    /// A REJECT verdict is on record. Terminal: a rejected intent
+    /// can never actuate.
+    Rejected,
+    /// Claimed, actuated, and completed with a result. Terminal.
+    Executed,
+}
+
+impl WorkState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkState::Accepted => "accepted",
+            WorkState::AwaitingVerdict => "awaiting_verdict",
+            WorkState::Admitted => "admitted",
+            WorkState::Rejected => "rejected",
+            WorkState::Executed => "executed",
+        }
+    }
+}
+
+/// One work order and everything this store knows about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkRecord {
+    pub id: String,
+    pub intent: Intent,
+    pub state: WorkState,
+    pub result: Option<Value>,
+}
+
+impl WorkRecord {
+    /// The `GET /gaia/v1/work/{id}` answer (G-2 §3.2): identity,
+    /// state, the result once there is one, and the provenance
+    /// trail — SI journal seqs plus spine event refs.
+    ///
+    /// `result` is present only when the work has completed; a
+    /// caller can tell "not finished" from "finished with a null
+    /// result" without guessing.
+    pub fn status_body(&self) -> Value {
+        // spine_event_refs is empty in G-3 — spine persistence is
+        // G-4; do not fake refs. Nothing was written to the spine
+        // for this record, so the honest list is the empty one.
+        let mut body = json!({
+            "work_id": self.id,
+            "state": self.state.as_str(),
+            "provenance": {
+                "si_journal_seqs": [self.intent.journal_seq],
+                "spine_event_refs": [],
+            },
+        });
+        if let Some(result) = &self.result {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("result".to_string(), result.clone());
+            }
+        }
+        body
+    }
+}
+
+/// Everything that can go wrong in the work lifecycle.
+///
+/// The `gaia_*` error types are deliberately disjoint from the
+/// gateway's `model_*` vocabulary (G-2 §3.2): no client can
+/// mistake a work problem for a residency diagnosis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GaiaError {
+    /// No record exists under this id.
+    UnknownWork(String),
+    /// The record's state forbids the transition: a second
+    /// verdict, a verdict after execution, actuating or
+    /// completing work whose state does not allow it.
+    VerdictConflict(String),
+    /// Actuation was attempted with no ADMIT verdict on record.
+    VerdictRequired(String),
+    /// The intent's class is one this fork is configured never
+    /// to carry (G-2 §3.2).
+    ClassNotCarried(String),
+    /// The submission or verdict itself could not be read.
+    Malformed(String),
+}
+
+impl GaiaError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            GaiaError::UnknownWork(_) => "gaia_work_unknown",
+            GaiaError::VerdictConflict(_) => "gaia_verdict_conflict",
+            GaiaError::VerdictRequired(_) => "gaia_verdict_required",
+            GaiaError::ClassNotCarried(_) => "gaia_class_not_carried",
+            GaiaError::Malformed(_) => "gaia_malformed_request",
+        }
+    }
+
+    pub fn status(&self) -> u16 {
+        match self {
+            GaiaError::UnknownWork(_) => 404,
+            GaiaError::VerdictConflict(_) => 409,
+            GaiaError::VerdictRequired(_) => 409,
+            GaiaError::ClassNotCarried(_) => 409,
+            GaiaError::Malformed(_) => 400,
+        }
+    }
+
+    /// The message carried by the error, formatted with its
+    /// context (work id, state, class) by whoever constructed it.
+    pub fn message(&self) -> String {
+        match self {
+            GaiaError::UnknownWork(m)
+            | GaiaError::VerdictConflict(m)
+            | GaiaError::VerdictRequired(m)
+            | GaiaError::ClassNotCarried(m)
+            | GaiaError::Malformed(m) => m.clone(),
+        }
+    }
+}
+
+impl fmt::Display for GaiaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.error_type(), self.message())
+    }
+}
+
+impl std::error::Error for GaiaError {}
+
+/// The store contract: the verdict state machine, behind a trait
+/// so G-4 can put the spine mirror under the same transitions
+/// without the callers changing.
+pub trait WorkStore {
+    /// Record a submission and return its record. The initial
+    /// state is derived from the verdict the intent carries:
+    /// `Admit` ⇒ `Admitted`, `Reject` ⇒ `Rejected`, none ⇒
+    /// `AwaitingVerdict`. A class this fork does not carry is
+    /// refused before any id is spent.
+    fn submit(&mut self, intent: Intent) -> Result<WorkRecord, GaiaError>;
+
+    /// A clone of the record under `id`, or `None`.
+    fn get(&self, id: &str) -> Option<WorkRecord>;
+
+    /// Record the gate's verdict for an escalated intent. Only a
+    /// record in `AwaitingVerdict` accepts one; any other state
+    /// already has its answer — or has acted on it — and a second
+    /// verdict is a conflict, not an update.
+    fn record_verdict(&mut self, id: &str, verdict: Verdict) -> Result<WorkRecord, GaiaError>;
+
+    /// Claim a record for actuation. Only `Admitted` records
+    /// claim successfully; claiming does not change the state —
+    /// the record rests in `Admitted` until `complete`.
+    fn claim_for_actuation(&mut self, id: &str) -> Result<WorkRecord, GaiaError>;
+
+    /// Finish a claimed record with its actuation result,
+    /// moving it to `Executed`. Only `Admitted` records complete.
+    fn complete(&mut self, id: &str, result: Value) -> Result<WorkRecord, GaiaError>;
+}
+
+/// The in-memory [`WorkStore`] of the G-3 skeleton.
+///
+/// Records are kept in submission order in a `Vec`; the counts
+/// here are work orders per process lifetime, and a linear scan
+/// states that plainly instead of dressing the skeleton up with
+/// an index it does not need. Ids are `work-000001`,
+/// `work-000002`, …, spent only on submissions that are actually
+/// recorded — a refused submission burns no id.
+#[derive(Debug, Clone)]
+pub struct MemoryWorkStore {
+    records: Vec<WorkRecord>,
+    next: u64,
+    carried: HashSet<String>,
+}
+
+impl MemoryWorkStore {
+    /// A store carrying the classes the fork actuates by
+    /// default: `read`, `write`, `execute`. `external` is NOT
+    /// carried by default — work that leaves the box is exactly
+    /// the class G-2 §3.2 names as refused with 409 while
+    /// unconfigured.
+    pub fn new() -> Self {
+        Self::with_carried_classes(
+            ["read", "write", "execute"]
+                .into_iter()
+                .map(str::to_string),
+        )
+    }
+
+    /// A store carrying exactly `classes`, for a deployment that
+    /// has configured its carried set — including one that
+    /// deliberately adds `external`.
+    pub fn with_carried_classes<I: IntoIterator<Item = String>>(classes: I) -> Self {
+        MemoryWorkStore {
+            records: Vec::new(),
+            next: 1,
+            carried: classes.into_iter().collect(),
+        }
+    }
+
+    fn find_mut(&mut self, id: &str) -> Option<&mut WorkRecord> {
+        self.records.iter_mut().find(|r| r.id == id)
+    }
+}
+
+impl Default for MemoryWorkStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkStore for MemoryWorkStore {
+    fn submit(&mut self, intent: Intent) -> Result<WorkRecord, GaiaError> {
+        if !self.carried.contains(&intent.class) {
+            return Err(GaiaError::ClassNotCarried(format!(
+                "class {:?} is not carried by this fork",
+                intent.class
+            )));
+        }
+        // Accepted exists for the 202 acknowledgement vocabulary;
+        // stored records start in one of the three states derived
+        // here, never in Accepted.
+        let state = match intent.verdict {
+            Some(Verdict::Admit) => WorkState::Admitted,
+            Some(Verdict::Reject) => WorkState::Rejected,
+            None => WorkState::AwaitingVerdict,
+        };
+        let record = WorkRecord {
+            id: format!("work-{:06}", self.next),
+            intent,
+            state,
+            result: None,
+        };
+        self.next += 1;
+        self.records.push(record.clone());
+        Ok(record)
+    }
+
+    fn get(&self, id: &str) -> Option<WorkRecord> {
+        self.records.iter().find(|r| r.id == id).cloned()
+    }
+
+    fn record_verdict(&mut self, id: &str, verdict: Verdict) -> Result<WorkRecord, GaiaError> {
+        let record = self
+            .find_mut(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        // This one rule yields both conflict cases: a second
+        // verdict, and a verdict arriving after execution. A
+        // verdict is recorded exactly once, while waiting for it.
+        if record.state != WorkState::AwaitingVerdict {
+            return Err(GaiaError::VerdictConflict(format!(
+                "work {id} is in state {}; a verdict can only be recorded while awaiting_verdict",
+                record.state.as_str()
+            )));
+        }
+        record.intent.verdict = Some(verdict);
+        record.state = match verdict {
+            Verdict::Admit => WorkState::Admitted,
+            Verdict::Reject => WorkState::Rejected,
+        };
+        Ok(record.clone())
+    }
+
+    fn claim_for_actuation(&mut self, id: &str) -> Result<WorkRecord, GaiaError> {
+        let record = self
+            .get(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        match record.state {
+            WorkState::Admitted => Ok(record),
+            WorkState::AwaitingVerdict => Err(GaiaError::VerdictRequired(format!(
+                "work {id} has no recorded verdict; an escalated intent cannot actuate until the gate's verdict is delivered"
+            ))),
+            WorkState::Rejected => Err(GaiaError::VerdictConflict(format!(
+                "work {id} was rejected by the gate; a rejected intent can never actuate"
+            ))),
+            WorkState::Executed => Err(GaiaError::VerdictConflict(format!(
+                "work {id} already executed"
+            ))),
+            // Unreachable for stored records (submit never rests
+            // in Accepted); an un-verdicted record is the honest
+            // reading if one ever appears.
+            WorkState::Accepted => Err(GaiaError::VerdictRequired(format!(
+                "work {id} has no recorded verdict"
+            ))),
+        }
+    }
+
+    fn complete(&mut self, id: &str, result: Value) -> Result<WorkRecord, GaiaError> {
+        let record = self
+            .find_mut(id)
+            .ok_or_else(|| GaiaError::UnknownWork(format!("unknown work id: {id}")))?;
+        if record.state != WorkState::Admitted {
+            return Err(GaiaError::VerdictConflict(format!(
+                "work {id} is in state {}; only admitted work can complete",
+                record.state.as_str()
+            )));
+        }
+        record.state = WorkState::Executed;
+        record.result = Some(result);
+        Ok(record.clone())
+    }
+}
+
+/// The actuation end of the lifecycle. Implementations execute
+/// exactly the admitted intent's journaled args, verbatim — they
+/// are handed the claimed record and nothing else, and they do
+/// not reinterpret it.
+pub trait Actuator {
+    fn actuate(&mut self, work: &WorkRecord) -> Result<Value, GaiaError>;
+}
+
+/// Claim, actuate, complete — in that order, or not at all.
+///
+/// The claim is the gate check: it refuses without an ADMIT
+/// verdict on record, and the actuator is invoked ONLY after a
+/// successful claim. If actuation itself fails, the error
+/// propagates and the record is left `Admitted` with no result —
+/// not completed, not quietly retried here.
+pub fn run_actuation(
+    store: &mut dyn WorkStore,
+    actuator: &mut dyn Actuator,
+    id: &str,
+) -> Result<WorkRecord, GaiaError> {
+    let claimed = store.claim_for_actuation(id)?;
+    let result = actuator.actuate(&claimed)?;
+    store.complete(id, result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent(verdict: Option<Verdict>) -> Intent {
+        intent_in_class(verdict, "execute")
+    }
+
+    fn intent_in_class(verdict: Option<Verdict>, class: &str) -> Intent {
+        Intent {
+            tool: "hearth.restart".to_string(),
+            args: json!({ "model": "glimmer" }),
+            reason: "observed lost{process_exited} at seq 7".to_string(),
+            task_id: "task-1".to_string(),
+            journal_seq: 42,
+            class: class.to_string(),
+            verdict,
+        }
+    }
+
+    #[test]
+    fn verdict_spellings_round_trip() {
+        assert_eq!(Verdict::parse("admit"), Some(Verdict::Admit));
+        assert_eq!(Verdict::parse("reject"), Some(Verdict::Reject));
+        assert_eq!(Verdict::Admit.as_str(), "admit");
+        assert_eq!(Verdict::Reject.as_str(), "reject");
+        assert_eq!(Verdict::parse("Admit"), None);
+        assert_eq!(Verdict::parse(""), None);
+        assert_eq!(Verdict::parse("escalate"), None);
+    }
+
+    #[test]
+    fn error_taxonomy_maps_type_and_status() {
+        let cases = [
+            (GaiaError::UnknownWork("x".into()), "gaia_work_unknown", 404),
+            (
+                GaiaError::VerdictConflict("x".into()),
+                "gaia_verdict_conflict",
+                409,
+            ),
+            (
+                GaiaError::VerdictRequired("x".into()),
+                "gaia_verdict_required",
+                409,
+            ),
+            (
+                GaiaError::ClassNotCarried("x".into()),
+                "gaia_class_not_carried",
+                409,
+            ),
+            (
+                GaiaError::Malformed("x".into()),
+                "gaia_malformed_request",
+                400,
+            ),
+        ];
+        for (err, kind, status) in cases {
+            assert_eq!(err.error_type(), kind);
+            assert_eq!(err.status(), status);
+            assert_eq!(err.message(), "x");
+        }
+    }
+
+    #[test]
+    fn submit_derives_state_from_carried_verdict() {
+        let mut store = MemoryWorkStore::new();
+        let admitted = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(admitted.state, WorkState::Admitted);
+        assert_eq!(admitted.id, "work-000001");
+
+        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        assert_eq!(rejected.state, WorkState::Rejected);
+        assert_eq!(rejected.id, "work-000002");
+
+        let escalated = store.submit(intent(None)).unwrap();
+        assert_eq!(escalated.state, WorkState::AwaitingVerdict);
+        assert_eq!(escalated.id, "work-000003");
+
+        // And get round-trips what submit returned.
+        assert_eq!(store.get(&escalated.id), Some(escalated));
+        assert_eq!(store.get("work-000099"), None);
+    }
+
+    #[test]
+    fn submit_refuses_a_class_the_fork_does_not_carry() {
+        let mut store = MemoryWorkStore::new();
+        let err = store
+            .submit(intent_in_class(Some(Verdict::Admit), "external"))
+            .unwrap_err();
+        assert_eq!(err.error_type(), "gaia_class_not_carried");
+        assert_eq!(err.status(), 409);
+        assert!(err.message().contains("external"));
+
+        // The refusal spent no id: the next recorded submission
+        // is still the first.
+        let ok = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        assert_eq!(ok.id, "work-000001");
+
+        // A store configured to carry external accepts it.
+        let mut configured =
+            MemoryWorkStore::with_carried_classes(["external".to_string()]);
+        let ok = configured
+            .submit(intent_in_class(Some(Verdict::Admit), "external"))
+            .unwrap();
+        assert_eq!(ok.state, WorkState::Admitted);
+    }
+
+    #[test]
+    fn verdict_transitions_an_awaiting_record_once() {
+        let mut store = MemoryWorkStore::new();
+        let a = store.submit(intent(None)).unwrap();
+        let admitted = store.record_verdict(&a.id, Verdict::Admit).unwrap();
+        assert_eq!(admitted.state, WorkState::Admitted);
+        assert_eq!(admitted.intent.verdict, Some(Verdict::Admit));
+
+        let r = store.submit(intent(None)).unwrap();
+        let rejected = store.record_verdict(&r.id, Verdict::Reject).unwrap();
+        assert_eq!(rejected.state, WorkState::Rejected);
+        assert_eq!(rejected.intent.verdict, Some(Verdict::Reject));
+    }
+
+    #[test]
+    fn double_verdict_is_a_conflict() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(None)).unwrap();
+        store.record_verdict(&rec.id, Verdict::Admit).unwrap();
+        let err = store.record_verdict(&rec.id, Verdict::Reject).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert_eq!(err.status(), 409);
+        assert!(err.message().contains("admitted"));
+
+        // A pre-admitted submission already has its verdict, too.
+        let pre = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let err = store.record_verdict(&pre.id, Verdict::Admit).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+    }
+
+    #[test]
+    fn verdict_after_execution_is_a_conflict() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        store.complete(&rec.id, json!({ "ok": true })).unwrap();
+        let err = store.record_verdict(&rec.id, Verdict::Admit).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert!(err.message().contains("executed"));
+
+        let err = store
+            .record_verdict("work-000099", Verdict::Admit)
+            .unwrap_err();
+        assert_eq!(err.error_type(), "gaia_work_unknown");
+        assert_eq!(err.status(), 404);
+    }
+
+    #[test]
+    fn claim_refuses_without_an_admit_verdict() {
+        let mut store = MemoryWorkStore::new();
+
+        let awaiting = store.submit(intent(None)).unwrap();
+        let err = store.claim_for_actuation(&awaiting.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_required");
+        assert_eq!(err.status(), 409);
+        assert!(err.message().contains("no recorded verdict"));
+
+        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let err = store.claim_for_actuation(&rejected.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert!(err.message().contains("can never actuate"));
+
+        let done = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        store.complete(&done.id, json!(null)).unwrap();
+        let err = store.claim_for_actuation(&done.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert!(err.message().contains("already executed"));
+
+        let err = store.claim_for_actuation("work-000099").unwrap_err();
+        assert_eq!(err.error_type(), "gaia_work_unknown");
+    }
+
+    #[test]
+    fn claim_admitted_succeeds_and_does_not_change_state() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let claimed = store.claim_for_actuation(&rec.id).unwrap();
+        assert_eq!(claimed.state, WorkState::Admitted);
+        assert_eq!(store.get(&rec.id).unwrap().state, WorkState::Admitted);
+    }
+
+    #[test]
+    fn complete_moves_admitted_to_executed_with_result() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let done = store.complete(&rec.id, json!({ "restarted": true })).unwrap();
+        assert_eq!(done.state, WorkState::Executed);
+        assert_eq!(done.result, Some(json!({ "restarted": true })));
+        assert_eq!(store.get(&rec.id), Some(done));
+    }
+
+    #[test]
+    fn complete_from_any_other_state_is_a_conflict() {
+        let mut store = MemoryWorkStore::new();
+        let awaiting = store.submit(intent(None)).unwrap();
+        let err = store.complete(&awaiting.id, json!(null)).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert!(err.message().contains("awaiting_verdict"));
+
+        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let err = store.complete(&rejected.id, json!(null)).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert!(err.message().contains("rejected"));
+
+        let err = store.complete("work-000099", json!(null)).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_work_unknown");
+        assert_eq!(err.status(), 404);
+    }
+
+    #[test]
+    fn status_body_omits_result_until_one_exists() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let body = rec.status_body();
+        assert_eq!(body["work_id"], json!("work-000001"));
+        assert_eq!(body["state"], json!("admitted"));
+        assert_eq!(body["provenance"]["si_journal_seqs"], json!([42]));
+        assert_eq!(body["provenance"]["spine_event_refs"], json!([]));
+        assert!(body.get("result").is_none());
+
+        let done = store.complete(&rec.id, json!({ "ok": true })).unwrap();
+        let body = done.status_body();
+        assert_eq!(body["state"], json!("executed"));
+        assert_eq!(body["result"], json!({ "ok": true }));
+    }
+
+    struct CountingActuator {
+        calls: usize,
+        outcome: Result<Value, GaiaError>,
+    }
+
+    impl Actuator for CountingActuator {
+        fn actuate(&mut self, work: &WorkRecord) -> Result<Value, GaiaError> {
+            self.calls += 1;
+            assert_eq!(work.state, WorkState::Admitted);
+            self.outcome.clone()
+        }
+    }
+
+    #[test]
+    fn run_actuation_claims_actuates_completes() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let mut actuator = CountingActuator {
+            calls: 0,
+            outcome: Ok(json!({ "restarted": true })),
+        };
+        let done = run_actuation(&mut store, &mut actuator, &rec.id).unwrap();
+        assert_eq!(actuator.calls, 1);
+        assert_eq!(done.state, WorkState::Executed);
+        assert_eq!(done.result, Some(json!({ "restarted": true })));
+    }
+
+    #[test]
+    fn run_actuation_never_touches_the_actuator_without_a_verdict() {
+        let mut store = MemoryWorkStore::new();
+        let mut actuator = CountingActuator {
+            calls: 0,
+            outcome: Ok(json!(null)),
+        };
+
+        // The acceptance case, proven: an escalated intent cannot
+        // reach the actuator without a recorded verdict.
+        let escalated = store.submit(intent(None)).unwrap();
+        let err = run_actuation(&mut store, &mut actuator, &escalated.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_required");
+        assert_eq!(actuator.calls, 0);
+
+        let rejected = store.submit(intent(Some(Verdict::Reject))).unwrap();
+        let err = run_actuation(&mut store, &mut actuator, &rejected.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_verdict_conflict");
+        assert_eq!(actuator.calls, 0);
+
+        // After the gate admits the escalated intent, the same
+        // call actuates exactly once.
+        store
+            .record_verdict(&escalated.id, Verdict::Admit)
+            .unwrap();
+        let done = run_actuation(&mut store, &mut actuator, &escalated.id).unwrap();
+        assert_eq!(actuator.calls, 1);
+        assert_eq!(done.state, WorkState::Executed);
+    }
+
+    #[test]
+    fn run_actuation_propagates_actuator_failure_without_completing() {
+        let mut store = MemoryWorkStore::new();
+        let rec = store.submit(intent(Some(Verdict::Admit))).unwrap();
+        let mut actuator = CountingActuator {
+            calls: 0,
+            outcome: Err(GaiaError::Malformed("actuation blew up".to_string())),
+        };
+        let err = run_actuation(&mut store, &mut actuator, &rec.id).unwrap_err();
+        assert_eq!(err.error_type(), "gaia_malformed_request");
+        let after = store.get(&rec.id).unwrap();
+        assert_eq!(after.state, WorkState::Admitted);
+        assert_eq!(after.result, None);
+    }
+}

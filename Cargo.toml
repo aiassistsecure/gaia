@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hearth-core", "crates/hearth-resolve", "crates/hearth-store", "crates/hearth-pull", "crates/hearth-api", "crates/hearth-serve", "crates/hearth-node", "crates/hearth-py"]
+members = ["crates/hearth-core", "crates/hearth-resolve", "crates/hearth-store", "crates/hearth-pull", "crates/hearth-api", "crates/hearth-serve", "crates/hearth-node", "crates/hearth-py", "crates/gaia-api"]
 
 [workspace.package]
 version = "0.4.7"
