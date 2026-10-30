@@ -16,8 +16,17 @@ and no inference route learns about work.
   POST /gaia/v1/work                 submit a journaled tool intent
   GET  /gaia/v1/work/{id}            status, and the result when finished
   POST /gaia/v1/work/{id}/verdict    deliver the gate's verdict
+  POST /gaia/v1/leash                deliver a leash record (S-4)
+  POST /gaia/v1/leash/heartbeat      leash feed heartbeat (S-4)
   GET  /gaia/v1/health               the agency surface itself
 ```
+
+The leash routes are the wire shape of the leash crossing
+(G-9 §12.3): they are answered by a `LeashSink` the
+composition implements, not by the work store — SI's
+journal is the leash's home, and what crosses here is a
+replica feed. A record the fork's watermark has already
+applied is a 200 with `applied: false`, not an error.
 
 ## Submitting work is not executing it
 

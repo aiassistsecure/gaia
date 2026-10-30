@@ -58,6 +58,7 @@ pub mod actuate;
 pub mod egress;
 pub mod egress_client;
 pub mod leash;
+pub mod leash_feed;
 pub mod outcomes;
 pub mod proposals;
 pub mod watcher;
@@ -66,6 +67,7 @@ pub use actuate::FleetActuator;
 pub use egress::{drive_egress, Disposition, EgressPass, EgressRecord, EgressStore};
 pub use egress_client::{Ack, GateVerdict, HttpProposalSink, ProposalSink, SendOutcome};
 pub use leash::{Leash, LeashKind, LeashRecord};
+pub use leash_feed::{ApplyOutcome, LeashFeed, StaleCause};
 pub use outcomes::{Outcome, OutcomeRecord, OutcomeStore};
 pub use proposals::{Proposal, ProposalStore};
 pub use watcher::{candidate, Candidate, Watcher};
@@ -112,6 +114,58 @@ impl EventLog for SharedMirror {
     }
 }
 
+/// The leash routes' sink (S-4, G-9 §12.3): an adapter over
+/// one composition's leash + leash feed, in the
+/// [`SharedMirror`] pattern — the wire shape lives in
+/// `gaia_api::leash`; the replica it feeds lives here. A
+/// record the watermark refuses is an ACK with
+/// `applied: false`, not an error; a store failure is an
+/// error, because a stop SI journaled that this fork could
+/// not record must be loud, never a cheerful ACK.
+pub struct LeashSinkAdapter<'a> {
+    feed: &'a mut LeashFeed,
+    leash: &'a mut Leash,
+}
+
+impl gaia_api::LeashSink for LeashSinkAdapter<'_> {
+    fn apply_leash_record(
+        &mut self,
+        record: &gaia_api::LeashRecordMsg,
+    ) -> Result<gaia_api::LeashAck, String> {
+        let rec = LeashRecord {
+            model: record.model.clone(),
+            kind: match record.kind.as_str() {
+                "stop" => LeashKind::Stop,
+                "resume" => LeashKind::Resume,
+                // `gaia_api::leash::handle` validates the kind
+                // before the sink is called; anything else
+                // here is a direct caller bypassing the route,
+                // and it is refused, not guessed at.
+                other => return Err(format!("unknown leash kind {other:?}")),
+            },
+            journal_seq: record.journal_seq,
+            reason: record.reason.clone(),
+        };
+        let outcome = self.feed.apply_record(self.leash, rec)?;
+        Ok(gaia_api::LeashAck {
+            applied: outcome == ApplyOutcome::Applied,
+            last_leash_seq: self.feed.watermark(&record.model),
+        })
+    }
+
+    fn leash_heartbeat(
+        &mut self,
+        heartbeat: &gaia_api::LeashHeartbeatMsg,
+    ) -> Result<gaia_api::LeashAck, String> {
+        self.feed
+            .note_heartbeat(&heartbeat.model, heartbeat.leash_tip, heartbeat.journal_tip);
+        Ok(gaia_api::LeashAck {
+            applied: true,
+            last_leash_seq: self.feed.watermark(&heartbeat.model),
+        })
+    }
+}
+
 /// What one composition step did, in counts and in the actual
 /// records — a caller reporting "2 transitions, 1 proposal" is
 /// reading this struct, not narrating.
@@ -153,6 +207,15 @@ pub struct Composition {
     /// path. Ephemeral until the binary installs the
     /// file-backed one ([`Composition::set_leash`]).
     leash: Leash,
+    /// The leash feed (S-4, G-9 §10.3): the watermark,
+    /// heartbeat, and staleness state that turns `leash`
+    /// from a locally-kept record into a derived replica of
+    /// SI's journal — records arrive over the leash routes,
+    /// apply in journal order under the watermark, and
+    /// actuation refuses fail-closed when the replica is
+    /// stale. Ephemeral until the binary installs the
+    /// file-backed one ([`Composition::set_leash_feed`]).
+    leash_feed: LeashFeed,
     /// Where re-pulls put their blobs (§5.3). The default is a
     /// relative `./blobs` with progress off — library-quiet;
     /// the binary points it at its home directory.
@@ -189,6 +252,7 @@ impl Composition {
             specs: HashMap::new(),
             outcomes: OutcomeStore::ephemeral(),
             leash: Leash::ephemeral(),
+            leash_feed: LeashFeed::ephemeral(),
             pull_cfg: PullConfig {
                 blobs_dir: PathBuf::from("./blobs"),
                 progress: false,
@@ -291,6 +355,62 @@ impl Composition {
         self.leash = leash;
     }
 
+    /// Install the file-backed leash feed (the binary opens
+    /// it beside the leash, seeded from it). Until then the
+    /// feed is ephemeral: watermarks and activation are
+    /// forgotten on restart — which fails closed (an active
+    /// model with no heartbeat in this process is stale),
+    /// never open.
+    pub fn set_leash_feed(&mut self, leash_feed: LeashFeed) {
+        self.leash_feed = leash_feed;
+    }
+
+    /// The leash feed: watermark, heartbeat, and staleness
+    /// state for the replica.
+    pub fn leash_feed(&self) -> &LeashFeed {
+        &self.leash_feed
+    }
+
+    /// The leash feed, mutably — the leash routes apply
+    /// records and note heartbeats here.
+    pub fn leash_feed_mut(&mut self) -> &mut LeashFeed {
+        &mut self.leash_feed
+    }
+
+    /// Apply one leash record arriving over the seam (S-4):
+    /// through the feed's watermark, into the leash. The
+    /// composition owns both stores, so this — not two
+    /// mutable accessors borrowed at once — is how a record
+    /// is applied outside the route sink.
+    pub fn apply_leash_record(&mut self, record: LeashRecord) -> Result<ApplyOutcome, String> {
+        self.leash_feed.apply_record(&mut self.leash, record)
+    }
+
+    /// Apply a leash snapshot record (G-9 §10.5 re-sync):
+    /// the same watermark path as an event record — the
+    /// snapshot is the same shape, sent once per model.
+    pub fn apply_leash_snapshot(&mut self, record: LeashRecord) -> Result<ApplyOutcome, String> {
+        self.leash_feed.apply_snapshot(&mut self.leash, record)
+    }
+
+    /// Note a leash heartbeat from SI (G-9 §10.3.4): the
+    /// feed stamps its local receipt time; the caller
+    /// supplies SI's leash tip and journal tip as carried.
+    pub fn note_leash_heartbeat(&mut self, model: &str, leash_tip: u64, journal_tip: u64) {
+        self.leash_feed
+            .note_heartbeat(model, leash_tip, journal_tip);
+    }
+
+    /// The sink the agency listener hands the leash routes:
+    /// this composition's feed + leash behind the
+    /// `gaia_api::LeashSink` boundary.
+    pub fn leash_sink(&mut self) -> LeashSinkAdapter<'_> {
+        LeashSinkAdapter {
+            feed: &mut self.leash_feed,
+            leash: &mut self.leash,
+        }
+    }
+
     /// Point re-pull actuation at a blob directory (the binary
     /// uses `<home>/blobs`, as upstream's `cmd_pull` does).
     pub fn set_pull_config(&mut self, pull_cfg: PullConfig) {
@@ -365,8 +485,10 @@ impl Composition {
     ///      returns the store's `GaiaError` here and the
     ///      actuator is never built, let alone invoked.
     ///   2. **Act.** The [`FleetActuator`] runs the admitted
-    ///      args verbatim through §5.3 — leash check first,
-    ///      stale-state check second, primitive last. Its
+    ///      args verbatim through §5.3 — leash-feed staleness
+    ///      first (S-4, for seam-active models), leash check
+    ///      second, stale-state check third, primitive last.
+    ///      Its
     ///      answer is an outcome: executed, refused, or
     ///      failed, each already recorded in the outcome
     ///      store by the actuator itself.
@@ -393,6 +515,7 @@ impl Composition {
                 supervisor: &mut self.supervisor,
                 specs: &self.specs,
                 leash: &self.leash,
+                leash_feed: Some(&self.leash_feed),
                 outcomes: &mut self.outcomes,
                 pull_cfg: &self.pull_cfg,
             };

@@ -20,10 +20,16 @@
 //! [`residency`]: `GET /gaia/v1/residency`, the structured state
 //! (enum + `lost_reason`) a policy consumer reads, where
 //! upstream's `/residency` renders only the human string. No
-//! tool is executed here — actuation is G-6.
+//! tool is executed here — actuation is G-6. S-4 adds
+//! [`leash`]: the wire shape of the leash crossing
+//! (`POST /gaia/v1/leash`, `POST /gaia/v1/leash/heartbeat`),
+//! carried to a [`LeashSink`] the composition implements —
+//! SI's journal is the leash's home; what crosses here is a
+//! replica feed, never a second source of truth.
 
 pub mod events;
 pub mod gateway;
+pub mod leash;
 pub mod mirror;
 pub mod residency;
 pub mod sse;
@@ -31,6 +37,7 @@ pub mod work;
 
 pub use events::{EventFilter, EventLog, Source, StreamEvent};
 pub use gateway::{classify, decide, Route};
+pub use leash::{LeashAck, LeashHeartbeatMsg, LeashRecordMsg, LeashSink};
 pub use mirror::MirrorStore;
 pub use sse::{EventHub, EventsConfig, EventsServer, SiEventBuffer};
 pub use work::{
