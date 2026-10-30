@@ -15,6 +15,7 @@ authors.workspace = true
 gaia-api = { path = "../gaia-api" }
 hearth-api = { path = "../hearth-api", version = "0.4.7" }
 hearth-core = { path = "../hearth-core", version = "0.4.7" }
+hearth-pull = { path = "../hearth-pull", version = "0.4.7" }
 hearth-serve = { path = "../hearth-serve", version = "0.4.7" }
 hearth-store = { path = "../hearth-store", version = "0.4.7" }
 serde_json = { workspace = true }

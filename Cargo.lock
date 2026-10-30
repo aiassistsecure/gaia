@@ -376,6 +376,7 @@ dependencies = [
  "gaia-api",
  "hearth-api",
  "hearth-core",
+ "hearth-pull",
  "hearth-serve",
  "hearth-store",
  "libc",
