@@ -273,7 +273,7 @@ fn parse_args() -> Args {
 /// cycle exists.
 fn ticker_loop(
     comp: Arc<Mutex<Composition>>,
-    work_store: Arc<Mutex<gaia_api::MemoryWorkStore>>,
+    work_store: Arc<Mutex<gaia_api::FileWorkStore>>,
 ) {
     loop {
         std::thread::sleep(Duration::from_millis(500));
@@ -385,7 +385,7 @@ fn ticker_loop(
 fn handle_agency(
     mut stream: TcpStream,
     comp: Arc<Mutex<Composition>>,
-    work_store: Arc<Mutex<gaia_api::MemoryWorkStore>>,
+    work_store: Arc<Mutex<gaia_api::FileWorkStore>>,
 ) {
     let req = match hearth_api::http::read_request(&stream) {
         Ok(r) => r,
@@ -625,7 +625,25 @@ fn main() {
     .unwrap_or_else(|e| fail(format!("binding events listener on {events_port}: {e}")));
 
     let comp = Arc::new(Mutex::new(comp));
-    let work_store = Arc::new(Mutex::new(gaia_api::MemoryWorkStore::new()));
+    // The work store (G-4b), file-backed under the same home as
+    // the other stores: work records, verdicts, results, and the
+    // S-1 dedup index are restart state, not process state — a
+    // restart that forgot them would lose the gate's answers and
+    // let a retried submission mint a second work order for the
+    // same journaled intent. Load failures (a torn tail after a
+    // crash) are counted and reported, never fatal.
+    let work_store = gaia_api::FileWorkStore::open(&home.join("work.jsonl"))
+        .unwrap_or_else(|e| fail(format!("opening work store: {e}")));
+    if !work_store.load_failures().is_empty() {
+        eprintln!(
+            "gaia: work store: {} line(s) skipped on load (see work.jsonl)",
+            work_store.load_failures().len()
+        );
+        for failure in work_store.load_failures() {
+            eprintln!("gaia: work store: {failure}");
+        }
+    }
+    let work_store = Arc::new(Mutex::new(work_store));
 
     // The ticker thread: the composition loop, the actuation
     // drain, and the owner of shutdown (see ticker_loop).
