@@ -423,8 +423,23 @@ fn handle_agency(
             match leash_resp {
                 Some(r) => r,
                 None => {
-                    let mut store = work_store.lock().unwrap_or_else(|p| p.into_inner());
-                    gaia_api::gateway::decide(&req, &mut *store)
+                    // SI events ingest next: it pushes into the
+                    // composition's SI event buffer, so — like
+                    // residency and leash — it is answered from
+                    // the composition, not the work gateway. The
+                    // response is owned, so the lock is released
+                    // before any socket write.
+                    let ingest_resp = {
+                        let guard = comp.lock().unwrap_or_else(|p| p.into_inner());
+                        gaia_api::ingest::handle(&req, &guard.si_events())
+                    };
+                    match ingest_resp {
+                        Some(r) => r,
+                        None => {
+                            let mut store = work_store.lock().unwrap_or_else(|p| p.into_inner());
+                            gaia_api::gateway::decide(&req, &mut *store)
+                        }
+                    }
                 }
             }
         }
@@ -592,20 +607,18 @@ fn main() {
     }
 
     // The events listener, on its own port and its own budget.
-    // The si source is a buffer this composition fills from
-    // nothing: per G-2 §4.2, how SI-side events reach the fork
-    // is a deployment choice of the SI adapter, and this binary
-    // wires no SI ingest transport — the si source therefore
-    // serves what is pushed in-process, which in this binary is
-    // nothing yet. The buffer is attached to the hub so that if
-    // an ingest is wired later, replay and live tail are already
-    // the same history.
-    let si_buffer = gaia_api::SiEventBuffer::new();
-    si_buffer.attach_hub(comp.hub());
+    // The si source is the composition's buffer, shared with
+    // the agency listener's ingest route (POST
+    // /gaia/v1/events/ingest): events SI pushes there land in
+    // the same history this listener replays and tails, so
+    // pushed events replay and tail as one history. The clone
+    // is taken here, while `comp` is still the plain value,
+    // before it is moved into its Arc<Mutex<..>> below — the
+    // same pre-Arc point where the mirror and hub are read.
     let _events_server = gaia_api::EventsServer::bind(
         &format!("127.0.0.1:{events_port}"),
         Arc::new(SharedMirror(comp.mirror())),
-        Arc::new(si_buffer),
+        Arc::new(comp.si_events()),
         comp.hub(),
         gaia_api::EventsConfig::default(),
     )

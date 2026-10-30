@@ -25,10 +25,16 @@
 //! (`POST /gaia/v1/leash`, `POST /gaia/v1/leash/heartbeat`),
 //! carried to a [`LeashSink`] the composition implements —
 //! SI's journal is the leash's home; what crosses here is a
-//! replica feed, never a second source of truth.
+//! replica feed, never a second source of truth. S-6 adds
+//! [`ingest`]: `POST /gaia/v1/events/ingest`, the transport that
+//! feeds the `si` source — SI journal events in SI's own event
+//! shape land in the [`sse::SiEventBuffer`], whose loud refusal
+//! of a duplicate or out-of-order seq is surfaced as its own
+//! error, never smoothed into a dedupe.
 
 pub mod events;
 pub mod gateway;
+pub mod ingest;
 pub mod leash;
 pub mod mirror;
 pub mod residency;
@@ -37,6 +43,7 @@ pub mod work;
 
 pub use events::{EventFilter, EventLog, Source, StreamEvent};
 pub use gateway::{classify, decide, Route};
+pub use ingest::handle as ingest_handle;
 pub use leash::{LeashAck, LeashHeartbeatMsg, LeashRecordMsg, LeashSink};
 pub use mirror::MirrorStore;
 pub use sse::{EventHub, EventsConfig, EventsServer, SiEventBuffer};

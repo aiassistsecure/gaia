@@ -78,8 +78,8 @@ use std::sync::{Arc, Mutex};
 
 use gaia_api::mirror::poll_once;
 use gaia_api::{
-    Actuator, EventFilter, EventHub, EventLog, GaiaError, MirrorStore, Source, StreamEvent,
-    WorkRecord, WorkStore,
+    Actuator, EventFilter, EventHub, EventLog, GaiaError, MirrorStore, SiEventBuffer, Source,
+    StreamEvent, WorkRecord, WorkStore,
 };
 use hearth_pull::PullConfig;
 use hearth_serve::server::ServerSpec;
@@ -233,6 +233,15 @@ pub struct Composition {
     /// its proposals accumulate un-ACKed, which is the honest
     /// posture for "SI's ingest is not wired here" (G-9 §13.1).
     egress_sink: Option<Box<dyn ProposalSink + Send>>,
+    /// The SI-source event buffer (S-6a, G-2 §4.2): the
+    /// ingest history the events listener replays and tails
+    /// for the `si` source. It is the composition's, not any
+    /// one listener's — the agency listener's ingest route
+    /// pushes into it and the events listener serves from it,
+    /// so both read one history. Attached to the hub at
+    /// construction ([`Composition::new`]), so pushed events
+    /// fan out live as well as replay.
+    si_events: SiEventBuffer,
 }
 
 impl Composition {
@@ -243,12 +252,20 @@ impl Composition {
         proposals: ProposalStore,
         hub: EventHub,
     ) -> Composition {
+        // The SI event buffer is created with the composition
+        // and attached to its hub here, before any listener
+        // exists, so a push that arrives ahead of the events
+        // listener's first subscriber is still kept for replay
+        // and fans out live from the first push onward.
+        let si_events = SiEventBuffer::new();
+        si_events.attach_hub(hub.clone());
         Composition {
             supervisor,
             mirror,
             watcher,
             proposals,
             hub,
+            si_events,
             specs: HashMap::new(),
             outcomes: OutcomeStore::ephemeral(),
             leash: Leash::ephemeral(),
@@ -323,6 +340,17 @@ impl Composition {
     /// to.
     pub fn hub(&self) -> EventHub {
         self.hub.clone()
+    }
+
+    /// The composition's SI event buffer. `SiEventBuffer` is
+    /// `Clone` over `Arc`s — the returned clone shares the
+    /// same history (a push through one clone is visible
+    /// through the other), which is what lets the binary hand
+    /// one clone to the events listener as its `si` log while
+    /// the agency listener's ingest route pushes through
+    /// another.
+    pub fn si_events(&self) -> gaia_api::SiEventBuffer {
+        self.si_events.clone()
     }
 
     /// Every proposal recorded so far, oldest first.
