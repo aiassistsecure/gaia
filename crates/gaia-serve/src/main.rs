@@ -3,7 +3,7 @@
 //! ```text
 //! gaia --model NAME=PATH [--model NAME=PATH …]
 //!      [--home DIR] [--port N] [--events-port N]
-//!      [--binary PATH] [--total-gib N]
+//!      [--binary PATH] [--total-gib N] [--ctx N] [--parallel N]
 //!      [--watch NAME …] [--watch-all]
 //! ```
 //!
@@ -68,9 +68,9 @@ use gaia_serve::{
     Composition, EgressStore, HttpProposalSink, Leash, LeashFeed, OutcomeStore, ProposalStore,
     SharedMirror, Watcher,
 };
-use hearth_core::{Budget, Declared};
+use hearth_core::Budget;
 use hearth_pull::PullConfig;
-use hearth_serve::server::{free_port, ServerSpec};
+use hearth_serve::server::free_port;
 use hearth_serve::Supervisor;
 use hearth_store::Spine;
 
@@ -102,7 +102,8 @@ fn usage_exit() -> ! {
     eprintln!(
         "usage: gaia --model NAME=PATH [--model NAME=PATH …] \
          [--home DIR] [--port N] [--events-port N] [--binary PATH] \
-         [--total-gib N] [--watch NAME …] [--watch-all] \
+         [--total-gib N] [--ctx N] [--parallel N] \
+         [--watch NAME …] [--watch-all] \
          [--si-addr HOST:PORT]"
     );
     std::process::exit(2);
@@ -127,6 +128,8 @@ struct Args {
     events_port: Option<u16>,
     binary: PathBuf,
     total_gib: u64,
+    ctx_pool: u32,
+    parallel: u32,
     watch: Vec<String>,
     watch_all: bool,
     /// Where SI's proposal ingest listens (`HOST:PORT`), if
@@ -185,6 +188,8 @@ fn parse_args() -> Args {
         events_port: None,
         binary: PathBuf::from("llama-server"),
         total_gib: 24,
+        ctx_pool: gaia_serve::fleet::DEFAULT_CTX_POOL,
+        parallel: gaia_serve::fleet::DEFAULT_PARALLEL,
         watch: Vec::new(),
         watch_all: false,
         si_addr: match std::env::var("GAIA_SI_ADDR") {
@@ -222,6 +227,8 @@ fn parse_args() -> Args {
             }
             "--binary" => args.binary = PathBuf::from(take_value(&argv, &mut i, inline)),
             "--total-gib" => args.total_gib = parse_num(&take_value(&argv, &mut i, inline)),
+            "--ctx" => args.ctx_pool = parse_num(&take_value(&argv, &mut i, inline)),
+            "--parallel" => args.parallel = parse_num(&take_value(&argv, &mut i, inline)),
             "--watch" => {
                 let name = take_value(&argv, &mut i, inline);
                 args.watch.push(name);
@@ -242,6 +249,14 @@ fn parse_args() -> Args {
     // empty roster has nothing to supervise, nothing to watch,
     // and nothing honest to serve.
     if args.models.is_empty() {
+        usage_exit();
+    }
+    // The ctx is a total pool and parallel divides it: a zero
+    // pool or more slots than tokens cannot be carved, and
+    // per-slot ctx must never fall to 0 — 0 is llama.cpp's
+    // unbounded native fallback, the failure this fix exists
+    // to remove.
+    if args.ctx_pool == 0 || args.parallel == 0 || args.parallel > args.ctx_pool {
         usage_exit();
     }
     args
@@ -403,9 +418,27 @@ fn handle_agency(
     // lock is held only for the duration of the call — the
     // response is owned, so the lock is released before any
     // socket write.
+    // The residency answer carries the spawn shape the
+    // composition actually used, so an operator auditing the
+    // node reads pool/parallel/per-slot from the status route,
+    // not from memory of the command line.
     let resp = {
         let guard = comp.lock().unwrap_or_else(|p| p.into_inner());
-        gaia_api::residency::handle(&req, guard.spine())
+        let shapes: std::collections::HashMap<String, gaia_api::residency::SpawnShape> = guard
+            .spawn_bounds_map()
+            .iter()
+            .map(|(model, b)| {
+                (
+                    model.clone(),
+                    gaia_api::residency::SpawnShape {
+                        ctx_pool: b.ctx_pool,
+                        parallel: b.parallel,
+                        ctx_per_slot: b.per_slot_ctx(),
+                    },
+                )
+            })
+            .collect();
+        gaia_api::residency::handle_annotated(&req, guard.spine(), &shapes)
     };
     let resp = match resp {
         Some(r) => r,
@@ -495,27 +528,25 @@ fn main() {
     };
     let watcher = Watcher::new(scope);
 
-    // Declarations: the weights are the file's actual size.
-    // kv_bytes is 0, honestly: upstream's `cmd_up` estimates KV
-    // bytes from the configured context and parallelism, and
-    // this composition does not replicate that estimate — so
-    // admission here accounts weights only, and a reader of
-    // this code (or of a budget refusal) should know the KV
-    // term is absent rather than estimated badly.
+    // The spawn bounds every child in this fleet shares: ctx
+    // is the budget, and parallel divides it.
+    let bounds = gaia_serve::fleet::ChildBounds {
+        ctx_pool: args.ctx_pool,
+        parallel: args.parallel,
+    };
+
+    // Declarations now carry the KV the pool will actually
+    // allocate — estimated from each GGUF's own header via
+    // `fleet::declare_model` (the estimate upstream's `cmd_up`
+    // makes and this composition previously did not); admission
+    // (Supervisor::new's plan) therefore refuses a fleet whose
+    // weights + pool KV exceed the budget, in the spine, before
+    // any child spawns; a header that cannot be read falls back
+    // to weights-only with a stderr warning, mirroring upstream.
     let mut declared = Vec::with_capacity(args.models.len());
     for (name, path) in &args.models {
-        let weights_bytes = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(e) => fail(format!(
-                "cannot read model {name} at {}: {e}",
-                path.display()
-            )),
-        };
-        declared.push(Declared {
-            model: name.clone(),
-            weights_bytes,
-            kv_bytes: 0,
-        });
+        declared
+            .push(gaia_serve::fleet::declare_model(name, path, bounds).unwrap_or_else(|e| fail(e)));
     }
     let budget = Budget {
         total_bytes: args.total_gib * hearth_core::GIB,
@@ -592,16 +623,20 @@ fn main() {
                 continue;
             }
         };
-        let mut spec = ServerSpec::new(name, path, port);
-        spec.binary = args.binary.clone();
-        spec.log_dir = log_dir.clone();
+        let spec = gaia_serve::fleet::child_spec(name, path, port, bounds, &args.binary, &log_dir);
         // The composition remembers the spec it started the
         // model with: an admitted restart (G-6) re-runs
         // exactly this spec, and one it never noted cannot be
         // restart-actuated at all.
         comp.note_spec(spec.clone());
+        comp.note_spawn_bounds(name, bounds);
         match comp.supervisor().start(spec) {
-            Ok(()) => eprintln!("gaia: {name} loading on 127.0.0.1:{port}"),
+            Ok(()) => eprintln!(
+                "gaia: {name} loading on 127.0.0.1:{port} — ctx pool {}, parallel {}, per-slot {}",
+                bounds.ctx_pool,
+                bounds.parallel,
+                bounds.per_slot_ctx()
+            ),
             Err(e) => eprintln!("gaia: {name} not started — {e}"),
         }
     }
