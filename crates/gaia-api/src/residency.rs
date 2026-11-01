@@ -41,6 +41,18 @@
 //! claiming a `failed` state from this source would be
 //! inventing resolution the record does not have.
 //!
+//! Three further fields appear only when the composition
+//! supplied a spawn shape for the model (see [`SpawnShape`]):
+//!
+//!   * `ctx_pool` → the total context budgeted for the model.
+//!   * `parallel` → the slot count the model runs with.
+//!   * `ctx_per_slot` → what each slot gets.
+//!
+//! When no shape was supplied for a model, none of the three
+//! appears on its view — a consumer must never have to guess
+//! whether an absent number means "not shaped" or
+//! "not recorded".
+//!
 //! Serving split: this route needs the spine, which the
 //! work-store-only [`crate::gateway::decide`] deliberately does
 //! not hold. The composition routes the request here instead —
@@ -51,12 +63,39 @@
 use hearth_store::Spine;
 use serde_json::{json, Value};
 
+/// The spawn shape a composition actually used for a model —
+/// pool ctx is the total context budgeted, parallel the slot
+/// count, per-slot ctx what each slot gets; carried on
+/// residency views so the numbers an operator audits are the
+/// numbers the node runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnShape {
+    pub ctx_pool: u32,
+    pub parallel: u32,
+    pub ctx_per_slot: u32,
+}
+
 /// The body of `GET /gaia/v1/residency`: one view per model
 /// the spine has ever seen, sorted by model name (the spine
 /// has no roster order; a policy consumer diffing two answers
 /// deserves a stable one).
 pub fn residency_body(spine: &Spine) -> Value {
-    let mut views: Vec<Value> = spine.all_latest().iter().map(view_for).collect();
+    residency_body_annotated(spine, &std::collections::HashMap::new())
+}
+
+/// The shapes-aware body of `GET /gaia/v1/residency`: as
+/// [`residency_body`], except a model present in `shapes`
+/// gains `ctx_pool`, `parallel`, and `ctx_per_slot` on its
+/// view, with the values the composition supplied.
+pub fn residency_body_annotated(
+    spine: &Spine,
+    shapes: &std::collections::HashMap<String, SpawnShape>,
+) -> Value {
+    let mut views: Vec<Value> = spine
+        .all_latest()
+        .iter()
+        .map(|ev| view_for(ev, shapes.get(ev.model.as_str())))
+        .collect();
     // The spine has no roster order, so sort here: a policy
     // consumer diffing two answers deserves a stable one.
     views.sort_by(|a, b| {
@@ -73,9 +112,9 @@ pub fn residency_body(spine: &Spine) -> Value {
 /// built only in the `lost` arm, so it appears on lost views
 /// and nowhere else — a consumer must never have to guess
 /// whether an absent reason means "not lost" or "not recorded".
-fn view_for(ev: &hearth_store::Event) -> Value {
+fn view_for(ev: &hearth_store::Event, shape: Option<&SpawnShape>) -> Value {
     let model = ev.model.as_str();
-    match ev.kind.as_str() {
+    let mut view = match ev.kind.as_str() {
         "declared" => json!({
             "model": model,
             "state": "unknown",
@@ -137,7 +176,17 @@ fn view_for(ev: &hearth_store::Event) -> Value {
             "operator_fault": false,
             "try_elsewhere": true,
         }),
+    };
+    // The spawn shape is appended after the state view is
+    // built, so a model with no supplied shape keeps exactly
+    // the view it has always had — the three fields appear
+    // together, with the supplied values, or not at all.
+    if let Some(shape) = shape {
+        view["ctx_pool"] = json!(shape.ctx_pool);
+        view["parallel"] = json!(shape.parallel);
+        view["ctx_per_slot"] = json!(shape.ctx_per_slot);
     }
+    view
 }
 
 /// Answer a request if — and only if — it is
@@ -147,6 +196,18 @@ fn view_for(ev: &hearth_store::Event) -> Value {
 /// request returns `None` so the composition can fall through
 /// to the work routes.
 pub fn handle(req: &hearth_api::Request, spine: &Spine) -> Option<hearth_api::Response> {
+    handle_annotated(req, spine, &std::collections::HashMap::new())
+}
+
+/// As [`handle`], except the views are annotated with the
+/// spawn shapes in `shapes`: a model present in the map gains
+/// `ctx_pool`, `parallel`, and `ctx_per_slot` on its view.
+/// With an empty map the answer is exactly [`handle`]'s.
+pub fn handle_annotated(
+    req: &hearth_api::Request,
+    spine: &Spine,
+    shapes: &std::collections::HashMap<String, SpawnShape>,
+) -> Option<hearth_api::Response> {
     // The same normalisation `gateway::classify` applies:
     // the method is case-insensitive, the query string is
     // stripped, and a trailing slash does not make a
@@ -159,7 +220,10 @@ pub fn handle(req: &hearth_api::Request, spine: &Spine) -> Option<hearth_api::Re
         .unwrap_or("")
         .trim_end_matches('/');
     if method == "GET" && p == "/gaia/v1/residency" {
-        Some(hearth_api::Response::json(200, residency_body(spine)))
+        Some(hearth_api::Response::json(
+            200,
+            residency_body_annotated(spine, shapes),
+        ))
     } else {
         None
     }
@@ -371,5 +435,74 @@ mod tests {
         let spine = spine_with_resident("muse");
         assert!(handle(&req("POST", "/gaia/v1/residency"), &spine).is_none());
         assert!(handle(&req("GET", "/gaia/v1/work"), &spine).is_none());
+    }
+
+    #[test]
+    fn supplied_shape_renders_the_three_fields_on_a_resident_view() {
+        let spine = spine_with_resident("muse");
+        let shapes = std::collections::HashMap::from([(
+            "muse".to_string(),
+            SpawnShape {
+                ctx_pool: 8192,
+                parallel: 4,
+                ctx_per_slot: 2048,
+            },
+        )]);
+        let resp = handle_annotated(&req("GET", "/gaia/v1/residency"), &spine, &shapes)
+            .expect("the residency route is answered here");
+        assert_eq!(resp.status, 200);
+        let body: Value = serde_json::from_str(&resp.body).unwrap();
+        let v = view(&body, "muse");
+        assert_eq!(v["state"], json!("resident"));
+        assert_eq!(v["ctx_pool"], json!(8192));
+        assert_eq!(v["parallel"], json!(4));
+        assert_eq!(v["ctx_per_slot"], json!(2048));
+    }
+
+    #[test]
+    fn no_shapes_renders_the_identical_body_as_handle() {
+        let spine = spine_with_resident("muse");
+        let plain = handle(&req("GET", "/gaia/v1/residency"), &spine)
+            .expect("the residency route is answered here");
+        let annotated = handle_annotated(
+            &req("GET", "/gaia/v1/residency"),
+            &spine,
+            &std::collections::HashMap::new(),
+        )
+        .expect("the residency route is answered here");
+        assert_eq!(annotated.status, plain.status);
+        assert_eq!(
+            annotated.body, plain.body,
+            "an empty shapes map changes nothing, byte for byte"
+        );
+        let body: Value = serde_json::from_str(&annotated.body).unwrap();
+        let v = view(&body, "muse");
+        assert!(v.as_object().unwrap().get("ctx_pool").is_none());
+        assert!(v.as_object().unwrap().get("parallel").is_none());
+        assert!(v.as_object().unwrap().get("ctx_per_slot").is_none());
+    }
+
+    #[test]
+    fn a_shape_for_a_different_model_does_not_leak_onto_this_view() {
+        let spine = spine_with_resident("muse");
+        let shapes = std::collections::HashMap::from([(
+            "other".to_string(),
+            SpawnShape {
+                ctx_pool: 8192,
+                parallel: 4,
+                ctx_per_slot: 2048,
+            },
+        )]);
+        let resp = handle_annotated(&req("GET", "/gaia/v1/residency"), &spine, &shapes)
+            .expect("the residency route is answered here");
+        let body: Value = serde_json::from_str(&resp.body).unwrap();
+        let v = view(&body, "muse");
+        assert_eq!(v["state"], json!("resident"));
+        assert!(
+            v.as_object().unwrap().get("ctx_pool").is_none(),
+            "ctx_pool appears only on the shaped model's view: {v}"
+        );
+        assert!(v.as_object().unwrap().get("parallel").is_none());
+        assert!(v.as_object().unwrap().get("ctx_per_slot").is_none());
     }
 }

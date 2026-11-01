@@ -57,6 +57,7 @@
 pub mod actuate;
 pub mod egress;
 pub mod egress_client;
+pub mod fleet;
 pub mod leash;
 pub mod leash_feed;
 pub mod outcomes;
@@ -66,6 +67,7 @@ pub mod watcher;
 pub use actuate::FleetActuator;
 pub use egress::{drive_egress, Disposition, EgressPass, EgressRecord, EgressStore};
 pub use egress_client::{Ack, GateVerdict, HttpProposalSink, ProposalSink, SendOutcome};
+pub use fleet::{child_spec, declare_model, kv_bytes_for_model, ChildBounds, DEFAULT_CTX_POOL, DEFAULT_PARALLEL};
 pub use leash::{Leash, LeashKind, LeashRecord};
 pub use leash_feed::{ApplyOutcome, LeashFeed, StaleCause};
 pub use outcomes::{Outcome, OutcomeRecord, OutcomeStore};
@@ -197,6 +199,15 @@ pub struct Composition {
     /// spec cannot be restart-actuated, and the actuator says
     /// so as a refusal rather than improvising one.
     specs: HashMap<String, ServerSpec>,
+    /// The [`fleet::ChildBounds`] each model was spawned
+    /// under, by model name — the pool its KV cache was
+    /// admitted against and its per-slot ctx was divided
+    /// from ([`Composition::note_spawn_bounds`]). Kept beside
+    /// `specs` for the same reason: a restart or a re-declare
+    /// must re-derive the same numbers the original spawn
+    /// used, not fall back to a default the model never ran
+    /// under.
+    spawn_bounds: HashMap<String, fleet::ChildBounds>,
     /// G-6 outcome records: every actuation attempt that
     /// passed the gate check, and what it did. Ephemeral until
     /// the binary installs the file-backed store under its
@@ -267,6 +278,7 @@ impl Composition {
             hub,
             si_events,
             specs: HashMap::new(),
+            spawn_bounds: HashMap::new(),
             outcomes: OutcomeStore::ephemeral(),
             leash: Leash::ephemeral(),
             leash_feed: LeashFeed::ephemeral(),
@@ -369,6 +381,19 @@ impl Composition {
     /// The binary calls this for every model it starts.
     pub fn note_spec(&mut self, spec: ServerSpec) {
         self.specs.insert(spec.model.clone(), spec);
+    }
+
+    /// Remember the bounds a model was spawned under, so a
+    /// later re-declare or restart works from the pool the
+    /// model actually runs with. The binary calls this for
+    /// every model it starts, beside [`Composition::note_spec`].
+    pub fn note_spawn_bounds(&mut self, model: &str, bounds: fleet::ChildBounds) {
+        self.spawn_bounds.insert(model.to_string(), bounds);
+    }
+
+    /// The spawn bounds recorded so far, by model name.
+    pub fn spawn_bounds_map(&self) -> &HashMap<String, fleet::ChildBounds> {
+        &self.spawn_bounds
     }
 
     /// Install the file-backed outcome store (the binary opens
