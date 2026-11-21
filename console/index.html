@@ -548,7 +548,7 @@
           <div class="wordmark">GAIA</div>
           <div class="brand-sub"><b>Sentinel Intelligence</b> &nbsp;·&nbsp; Runtime</div>
         </div>
-        <span class="concept-tag">Concept UI · Live Data Snapshot</span>
+        <span class="concept-tag" id="modeTag">Concept UI · Live Data Snapshot</span>
       </div>
       <div class="lamp-wrap" role="status" aria-label="Resident mind online">
         <span class="lamp" aria-hidden="true"></span>
@@ -564,10 +564,10 @@
     <section class="panel chat-panel rise" style="--d:2" aria-labelledby="chat-title">
       <div class="panel-head">
         <h2 class="panel-title" id="chat-title">Chat — Resident Mind</h2>
-        <span class="panel-sub">Concept preview</span>
+        <span class="panel-sub" id="chatMode">Concept preview</span>
       </div>
       <div class="chat-thread" id="chatThread" aria-label="Conversation with the resident mind, concept preview">
-        <span class="chat-day">Concept preview · Sample exchange</span>
+        <span class="chat-day" id="chatDay">Concept preview · Sample exchange</span>
         <div class="msg op"><span class="who">Operator</span><div class="bubble">Gaia — status of the resident mind?</div></div>
         <div class="msg gaia"><span class="who">Gaia · Imagine v13</span><div class="bubble">Resident and steady. Context pool 4096, one parallel slot, base frozen. Gate, journal and seam are all nominal.</div></div>
         <div class="msg op"><span class="who">Operator</span><div class="bubble">Anything waiting on me?</div></div>
@@ -582,7 +582,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.4 19.6 21.7 12 4.4 4.4l-.01 6.1L15.6 12 4.39 13.5l.01 6.1z"/></svg>
           </button>
         </form>
-        <p class="compose-note">Concept preview — this screen isn't wired to the live runtime yet.</p>
+        <p class="compose-note" id="composeNote">Concept preview — this screen isn't wired to the live runtime yet.</p>
       </div>
     </section>
 
@@ -704,10 +704,14 @@
       });
     });
 
-    // Concept chat: sending appends the operator's line and an honest canned reply.
+    // Chat: sends through the console server (/api/chat) to the resident
+    // model on this node and renders its real reply. If the server or the
+    // model can't be reached, the bubble says so plainly.
     var form = document.getElementById('chatForm');
     var input = document.getElementById('chatInput');
     var thread = document.getElementById('chatThread');
+    var chatHistory = [];
+    var chatBusy = false;
     function addMsg(cls, who, text){
       var wrap = document.createElement('div');
       wrap.className = 'msg ' + cls;
@@ -718,16 +722,36 @@
       wrap.appendChild(w); wrap.appendChild(b);
       thread.appendChild(wrap);
       thread.scrollTop = thread.scrollHeight;
+      return b;
     }
     form.addEventListener('submit', function(e){
       e.preventDefault();
       var text = input.value.trim();
-      if(!text) return;
+      if(!text || chatBusy) return;
+      chatBusy = true;
       addMsg('op', 'Operator', text);
       input.value = '';
-      setTimeout(function(){
-        addMsg('gaia', 'Gaia · Imagine v13', 'Concept preview — this screen isn\'t wired to the live runtime yet, so I can\'t act on that here.');
-      }, 450);
+      var pending = addMsg('gaia', 'Gaia · Imagine v13',
+        'Thinking — the resident model runs on CPU here, so replies can take a while…');
+      fetch('/api/chat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: text, history: chatHistory})
+      }).then(function(resp){
+        return resp.json().then(function(doc){ return {ok: resp.ok, doc: doc}; });
+      }).then(function(result){
+        if(!result.ok || !result.doc || typeof result.doc.reply !== 'string'){
+          throw new Error((result.doc && result.doc.error) || 'no reply from the console server');
+        }
+        pending.textContent = result.doc.reply || '(the model returned an empty reply)';
+        chatHistory.push({role: 'user', content: text});
+        chatHistory.push({role: 'assistant', content: result.doc.reply});
+        if(chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+        thread.scrollTop = thread.scrollHeight;
+      }).catch(function(err){
+        pending.textContent = 'Couldn\'t reach the resident model — ' + err.message +
+          '. Nothing was sent anywhere else.';
+      }).then(function(){ chatBusy = false; });
     });
 
     // Journal / Escalations tabs: one shared panel, one pane at a time.
@@ -1002,6 +1026,8 @@
       if(e.key === 'Escape' && !backdrop.hidden) closeModal();
     });
 
+    var journalFootNote = 'si-seam.si · embedded NEDB journal · hash chain verified · snapshot 2026-11-21';
+
     function openJournal(seq, trigger){
       var e = JOURNAL[seq];
       if(!e) return;
@@ -1019,8 +1045,28 @@
       modalBody.innerHTML =
         '<p class="modal-sec">Entry detail — verbatim from the journal</p>' +
         '<div class="kv-list">' + fields.map(kvRow).join('') + '</div>';
-      modalFoot.innerHTML = '<span class="foot-note">si-seam.si · embedded NEDB journal · hash chain verified · snapshot 2026-11-21</span>';
+      modalFoot.innerHTML = '<span class="foot-note">' + esc(journalFootNote) + '</span>';
       openModal(trigger);
+    }
+
+    // Prefer the escalation's real gate report (live data) over the
+    // snapshot's reconstructed checks.
+    function checksFor(e){
+      var report = e.gateReport;
+      if(report && Array.isArray(report.checks) && report.checks.length){
+        return report.checks.map(function(c){
+          var na = c.label === 'not-applicable';
+          return {
+            name: c.name,
+            mark: c.passed ? 'pass' : (na ? 'na' : 'fail'),
+            markLabel: c.passed ? 'Pass' : (na ? 'Not applicable' : 'Fail'),
+            measured: (c.measured === null || c.measured === undefined) ? null : String(c.measured),
+            detail: c.detail || '',
+            subchecks: (c.subchecks || []).map(function(s){ return [s.name, s.detail || '', !!s.passed]; })
+          };
+        });
+      }
+      return gateChecks(e);
     }
 
     function openEscalation(id, trigger){
@@ -1029,25 +1075,26 @@
       modalKicker.textContent = 'Escalation · self_edits · si-seam.si';
       modalTitle.innerHTML = esc(id) + ' <span class="chip escalate">Escalate</span> <span class="chip state">Escalated</span>';
       var facts = factGrid([
-        ["Tool", "hearth.restart", "m"],
+        ["Tool", e.tool || "hearth.restart", "m"],
         ["Model", e.model, "m"],
         ["Intent seq", String(e.intentSeq), "m"],
         ["Task seq", String(e.taskSeq), "m"],
-        ["Effective class", "external", "m"],
-        ["Resolution", "none", "m"],
+        ["Effective class", e.effectiveClass || "external", "m"],
+        ["Resolution", e.resolution || "none", "m"],
         ["Opened", e.opened, "m"],
         ["Spine event seq", String(e.spineSeq), "m"],
         ["Spine event hash", e.spineHash, "h"],
         ["Ordering key", e.orderingKey, "m"]
       ]);
-      var checks = gateChecks(e).map(function(c){
+      var checks = checksFor(e).map(function(c){
         var out = '<div class="check"><div class="check-top"><span class="check-name">' + esc(c.name) + '</span>' +
           (c.measured !== null ? '<span class="check-measured">measured ' + esc(c.measured) + '</span>' : '') +
           '<span class="mark ' + c.mark + '">' + esc(c.markLabel) + '</span></div>' +
           '<div class="check-detail">' + esc(c.detail) + '</div>';
         if(c.subchecks){
           out += '<div class="subchecks">' + c.subchecks.map(function(s){
-            return '<div class="subcheck"><span class="sn">' + esc(s[0]) + '</span><span class="sm">Pass</span><span class="sd">' + esc(s[1]) + '</span></div>';
+            var sPass = s[2] === undefined ? true : !!s[2];
+            return '<div class="subcheck"><span class="sn">' + esc(s[0]) + '</span><span class="sm">' + (sPass ? 'Pass' : 'Fail') + '</span><span class="sd">' + esc(s[1]) + '</span></div>';
           }).join('') + '</div>';
         }
         return out + '</div>';
@@ -1055,7 +1102,7 @@
       modalBody.innerHTML =
         '<p class="modal-sec">Facts</p>' + facts +
         '<p class="modal-sec">Reason</p><div class="prose">' + esc(e.reason) + '</div>' +
-        '<p class="modal-sec">Execution</p><div class="prose">' + esc(EXECUTION_NOTE) + '</div>' +
+        '<p class="modal-sec">Execution</p><div class="prose">' + esc((e.gateReport && e.gateReport.execution) || EXECUTION_NOTE) + '</div>' +
         '<p class="modal-sec">Gate report — verdict ESCALATE</p><div class="check-list">' + checks + '</div>' +
         '<p class="modal-sec">Chain</p><div class="kv-list">' +
           kvRow(["Entry hash", e.entryHash, "h"]) +
@@ -1080,6 +1127,163 @@
     }
     wireRows('.j-row', 'data-journal', openJournal);
     wireRows('.esc-row', 'data-esc', openEscalation);
+
+    /* ================================================================
+       LIVE WIRING — on load, fetch the console server's APIs and
+       re-render from the live journals. If the APIs don't answer,
+       the baked 2026-11-21 snapshot above stays and is labelled
+       SNAPSHOT. The snapshot is a fallback, never a disguise.
+       ================================================================ */
+    var modeTag = document.getElementById('modeTag');
+
+    function fetchJson(url, timeoutMs){
+      var ctrl = new AbortController();
+      var timer = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+      return fetch(url, {signal: ctrl.signal}).then(function(resp){
+        clearTimeout(timer);
+        if(!resp.ok) throw new Error(url + ' answered ' + resp.status);
+        return resp.json();
+      });
+    }
+
+    function ageDays(iso){
+      var opened = new Date(iso);
+      var a = Date.UTC(opened.getUTCFullYear(), opened.getUTCMonth(), opened.getUTCDate());
+      var now = new Date();
+      var b = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      return Math.max(0, Math.round((b - a) / 86400000)) + 'd';
+    }
+
+    function buildJournalRow(e, isNew){
+      var row = document.createElement('div');
+      row.className = 'j-row' + (isNew ? ' is-new' : '');
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.setAttribute('data-journal', String(e.seq));
+      row.setAttribute('aria-label', 'Journal seq ' + e.seq + ', ' +
+        e.kindLabel.toLowerCase() + ', ' + e.tsShort.replace(/Z$/, ' UTC') +
+        '. Show full detail.');
+      row.innerHTML =
+        '<span class="j-seq">#' + esc(String(e.seq)) + '</span>' +
+        '<span class="j-kind' + (e.kind === 'checkpoint' ? ' ckpt' : '') + '">' +
+          esc(e.kindLabel) + '</span>' +
+        '<span class="j-time">' + esc(e.tsShort) + '</span>' +
+        '<span class="j-text">' + e.summary + '</span>' +
+        '<span class="j-chev" aria-hidden="true">›</span>';
+      return row;
+    }
+
+    function buildEscRow(x){
+      var row = document.createElement('div');
+      row.className = 'esc-row';
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.setAttribute('data-esc', x.id);
+      row.setAttribute('aria-label', 'Escalation ' + x.id + ', ' + (x.tool || '') +
+        ', ' + x.model + ', opened ' + String(x.opened).slice(0, 10) +
+        '. Show full detail.');
+      var stateLabel = x.state ? x.state.charAt(0).toUpperCase() + x.state.slice(1) : 'Escalated';
+      row.innerHTML =
+        '<div class="esc-main"><div class="esc-id">' + esc(x.id) +
+          ' <span>· ' + esc(x.tool || '') + '</span></div>' +
+        '<div class="esc-desc">' + esc(x.model) + ' · intent seq ' + esc(String(x.intentSeq)) +
+          ' · task ' + esc(String(x.taskSeq)) + ' · opened <span class="mono">' +
+          esc(String(x.opened).slice(0, 19) + 'Z') + '</span></div></div>' +
+        '<div class="esc-age"><strong>' + esc(ageDays(x.opened)) + '</strong><span>open</span></div>' +
+        '<div class="esc-side"><span class="state-chip">' + esc(stateLabel) +
+          '</span><span class="esc-details">Details ›</span></div>';
+      return row;
+    }
+
+    function renderJournal(doc){
+      JOURNAL = {};
+      var well = document.querySelector('.journal-well');
+      if(!well) return;
+      well.innerHTML = '';
+      doc.entries.forEach(function(e, i){
+        JOURNAL[String(e.seq)] = e;
+        well.appendChild(buildJournalRow(e, i === 0));
+      });
+      wireRows('.j-row', 'data-journal', openJournal);
+      notes.journal = 'si-seam.si · chain verified · tip seq ' + doc.tip + ' · live';
+      journalFootNote = 'si-seam.si · embedded NEDB journal · hash chain verified · live';
+      var active = document.querySelector('.tab-btn.is-active');
+      if(active && active.getAttribute('data-tab') === 'journal' && tabNote){
+        tabNote.textContent = notes.journal;
+      }
+    }
+
+    function renderEscalations(doc){
+      ESCALATIONS = {};
+      var list = document.querySelector('.esc-list');
+      if(!list) return;
+      list.innerHTML = '';
+      doc.escalations.forEach(function(x){
+        ESCALATIONS[x.id] = x;
+        list.appendChild(buildEscRow(x));
+      });
+      wireRows('.esc-row', 'data-esc', openEscalation);
+      var count = document.querySelector('.tab-count');
+      if(count) count.textContent = doc.count + ' open';
+    }
+
+    function renderSpine(doc){
+      var last = doc.last_event || {};
+      var facts = last.facts || {};
+      var strip = document.querySelector('.spine-strip span');
+      if(strip){
+        var warm = facts.warmup_ms !== undefined && facts.warmup_ms !== null
+          ? ', warmup ' + Number(facts.warmup_ms).toLocaleString('en-US') + ' ms' : '';
+        strip.innerHTML = '<b>Node spine</b> · ' + esc(String(doc.total_entries)) +
+          ' residency entries · head seq <b>' + esc(String(doc.head_seq)) +
+          '</b> · last event: ' + esc(last.model || '') + ' ' + esc(last.kind || '') +
+          warm + ' (seq ' + esc(String(last.seq)) + ', hash <span class="spine-hash" title="' +
+          esc(last.hash || '') + '">' + esc(String(last.hash || '').slice(0, 8)) +
+          '…</span>)';
+      }
+      var models = (doc.residency && doc.residency.models) || [];
+      var resident = null;
+      models.forEach(function(m){ if(m.state === 'resident' && m.ctx_pool) resident = m; });
+      if(resident){
+        var nameEl = document.querySelector('.mind-name');
+        if(nameEl && nameEl.childNodes.length){
+          nameEl.childNodes[0].textContent =
+            resident.model.charAt(0).toUpperCase() + resident.model.slice(1).replace('-', ' ');
+        }
+        var specs = document.querySelectorAll('.mind-panel .spec strong');
+        if(specs.length >= 2){
+          specs[0].innerHTML = esc(String(resident.ctx_pool)) + ' <em>tok</em>';
+          specs[1].innerHTML = esc(String(resident.parallel)) + ' <em>slot</em>';
+        }
+      }
+    }
+
+    function markChatLive(){
+      var chatMode = document.getElementById('chatMode');
+      if(chatMode) chatMode.textContent = 'Live · resident model';
+      var chatDay = document.getElementById('chatDay');
+      if(chatDay) chatDay.textContent = 'Live session · sample exchange above, then your messages';
+      var note = document.getElementById('composeNote');
+      if(note) note.textContent = 'Live — messages go to the resident model (Imagine v13) on this node.';
+    }
+
+    var journalP = fetchJson('/api/journal', 15000);
+    var escP = fetchJson('/api/escalations', 15000);
+    var spineP = fetchJson('/api/spine', 25000);
+
+    Promise.allSettled([journalP, escP]).then(function(results){
+      var jOk = results[0].status === 'fulfilled';
+      var eOk = results[1].status === 'fulfilled';
+      if(jOk) renderJournal(results[0].value);
+      if(eOk) renderEscalations(results[1].value);
+      if(jOk && eOk){
+        if(modeTag) modeTag.textContent = 'LIVE · wired to this node';
+        markChatLive();
+      } else if(modeTag){
+        modeTag.textContent = 'SNAPSHOT · console APIs unreachable — showing the 2026-11-21 snapshot';
+      }
+    });
+    spineP.then(function(doc){ renderSpine(doc); }).catch(function(){ /* snapshot strip stays */ });
   })();
 </script>
 </body>
