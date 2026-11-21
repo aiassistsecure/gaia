@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<link rel="icon" href="data:," />
+<title>Gaia Console — Concept</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Manrope:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ambient:#8fd3e8;
+    --ambient-soft:rgba(143,211,232,.55);
+    --ink:#eceae6;
+    --ink-dim:#a9a7a1;
+    --ink-faint:#6f6d68;
+    --glass:linear-gradient(165deg, rgba(38,40,44,.92) 0%, rgba(16,17,19,.96) 42%, rgba(10,10,12,.98) 100%);
+    --hairline:linear-gradient(90deg, transparent, rgba(255,255,255,.55), rgba(190,200,210,.25), transparent);
+    --radius:22px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    font-family:"Manrope", system-ui, sans-serif;
+    font-weight:400;
+    color:var(--ink);
+    background:
+      radial-gradient(1100px 520px at 50% -12%, rgba(143,211,232,.10), transparent 60%),
+      radial-gradient(900px 700px at 108% 112%, rgba(0,0,0,.7), transparent 55%),
+      radial-gradient(700px 500px at -8% 108%, rgba(60,64,70,.35), transparent 60%),
+      linear-gradient(160deg, #232527 0%, #17181a 34%, #101112 62%, #0a0a0b 100%);
+    overflow:hidden;
+    position:relative;
+  }
+  /* soft-touch surround: fine matte grain */
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:.05;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  }
+  /* stitched-leather frame, inset like a cabin trim seam */
+  body::after{
+    content:""; position:fixed; inset:9px; pointer-events:none; z-index:3;
+    border:1px dashed rgba(255,255,255,.10); border-radius:26px;
+  }
+  .vignette{
+    position:fixed; inset:0; pointer-events:none; z-index:0;
+    background:radial-gradient(ellipse at 50% 40%, transparent 55%, rgba(0,0,0,.5) 100%);
+  }
+
+  .console{
+    position:relative; z-index:1;
+    height:100dvh;
+    max-width:1360px;
+    margin:0 auto;
+    padding:20px 22px 16px;
+    display:flex; flex-direction:column; gap:14px;
+  }
+
+  /* ---------- glass panel (piano black) ---------- */
+  .panel{
+    position:relative;
+    background:var(--glass);
+    border:1px solid rgba(255,255,255,.08);
+    border-radius:var(--radius);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.14),
+      inset 0 0 42px rgba(255,255,255,.025),
+      inset 0 -18px 34px rgba(0,0,0,.5),
+      0 18px 40px rgba(0,0,0,.5);
+    overflow:hidden;
+  }
+  /* showroom sheen along the top edge */
+  .panel::before{
+    content:""; position:absolute; left:6%; right:6%; top:0; height:1px;
+    background:var(--hairline); opacity:.8; pointer-events:none;
+  }
+  /* Aceternity spotlight: a soft light that follows the cursor */
+  .panel::after{
+    content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    background:radial-gradient(340px circle at var(--mx,50%) var(--my,50%), rgba(190,228,242,.10), rgba(143,211,232,.045) 42%, transparent 68%);
+    opacity:0; transition:opacity .45s ease;
+  }
+  .panel:hover::after{opacity:1}
+  .panel > *{position:relative; z-index:1}
+
+  .panel-head{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:16px 20px 10px;
+  }
+  .panel-title{
+    margin:0;
+    font-size:11px; letter-spacing:.26em; font-weight:600; text-transform:uppercase;
+    color:#d9d6cf;
+  }
+  .panel-sub{font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); font-weight:500; white-space:nowrap}
+
+  /* ---------- header ---------- */
+  header.panel{flex:none; padding:18px 24px 16px; border-radius:26px}
+  .header-row{display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap}
+  .brand{display:flex; align-items:center; gap:18px; min-width:0}
+  .wordmark{
+    font-family:"Marcellus", serif; font-weight:400; font-size:44px; letter-spacing:.34em; line-height:1;
+    background:linear-gradient(100deg, #8f9296 0%, #f4f2ec 22%, #c9ccd0 40%, #fdfcf8 55%, #a9adb2 74%, #e9e7e1 100%);
+    background-size:220% 100%;
+    -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; color:transparent;
+    filter:drop-shadow(0 2px 10px rgba(0,0,0,.5));
+  }
+  @media (prefers-reduced-motion: no-preference){
+    .wordmark{animation:shine 7s ease-in-out infinite}
+    @keyframes shine{0%,100%{background-position:110% 0}50%{background-position:-10% 0}}
+  }
+  .brand-sub{margin-top:7px; font-size:10.5px; letter-spacing:.3em; text-transform:uppercase; color:var(--ink-dim); font-weight:500}
+  .brand-sub b{color:#e3e0d9; font-weight:600}
+  .concept-tag{
+    font-size:9.5px; letter-spacing:.24em; font-weight:600; text-transform:uppercase;
+    color:var(--ambient);
+    border:1px solid rgba(143,211,232,.4);
+    background:rgba(143,211,232,.07);
+    padding:6px 10px 5px 12px; border-radius:999px;
+    box-shadow:inset 0 0 12px rgba(143,211,232,.10);
+    white-space:nowrap;
+  }
+  .lamp-wrap{display:flex; align-items:center; gap:11px; padding:9px 16px 9px 12px; border-radius:999px;
+    background:rgba(255,255,255,.03); border:1px solid rgba(255,255,255,.08);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 18px rgba(143,211,232,.05)}
+  .lamp{
+    width:9px; height:9px; border-radius:50%; flex:none; position:relative;
+    background:radial-gradient(circle at 40% 35%, #eaf9ff, var(--ambient) 55%, #3d7e96 100%);
+    box-shadow:0 0 10px var(--ambient-soft), 0 0 26px rgba(143,211,232,.3);
+  }
+  @media (prefers-reduced-motion: no-preference){
+    .lamp{animation:breathe 3.2s ease-in-out infinite}
+    @keyframes breathe{0%,100%{box-shadow:0 0 8px rgba(143,211,232,.45), 0 0 20px rgba(143,211,232,.22)}50%{box-shadow:0 0 13px rgba(143,211,232,.7), 0 0 34px rgba(143,211,232,.38)}}
+  }
+  .lamp-label{font-size:10.5px; letter-spacing:.2em; font-weight:600; color:#eef3f2; text-transform:uppercase; white-space:nowrap}
+  .lamp-label span{display:block; font-size:9px; letter-spacing:.16em; color:var(--ink-faint); font-weight:500; margin-top:2px; text-transform:uppercase}
+
+  /* ambient cabin light strip */
+  .ambient-strip{
+    flex:none; height:2px; border-radius:2px; margin:0 26px;
+    background:linear-gradient(90deg, transparent 0%, rgba(143,211,232,.12) 14%, var(--ambient-soft) 50%, rgba(143,211,232,.12) 86%, transparent 100%);
+    box-shadow:0 0 14px rgba(143,211,232,.35), 0 0 42px rgba(143,211,232,.14);
+  }
+
+  /* ---------- bento grid ---------- */
+  main{
+    flex:1; min-height:0;
+    display:grid;
+    grid-template-columns: 392px 1fr 1fr;
+    grid-template-rows: auto 1fr;
+    gap:14px;
+  }
+  .chat-panel{grid-row:1 / 3; display:flex; flex-direction:column; min-height:0}
+  .mind-panel{grid-column:2}
+  .conf-panel{grid-column:3}
+  .ledger-panel{grid-column:2 / 4; display:flex; flex-direction:column; min-height:0}
+
+  /* ---------- shared tabbed panel (Journal / Escalations) ---------- */
+  .tab-bar{
+    flex:none; display:flex; align-items:flex-end; justify-content:space-between; gap:12px;
+    padding:12px 20px 0;
+  }
+  .tabs{display:flex; gap:4px; position:relative}
+  .tab-btn{
+    appearance:none; background:none; border:0; cursor:pointer;
+    font-family:"Manrope",sans-serif; font-size:11px; letter-spacing:.22em; font-weight:600; text-transform:uppercase;
+    color:var(--ink-faint); padding:9px 16px 11px; position:relative;
+    transition:color .3s ease;
+  }
+  .tab-btn::after{
+    content:""; position:absolute; left:14px; right:14px; bottom:-1px; height:2px; border-radius:2px;
+    background:linear-gradient(90deg, transparent, var(--ambient) 30%, var(--ambient) 70%, transparent);
+    box-shadow:0 0 10px rgba(143,211,232,.55), 0 0 24px rgba(143,211,232,.22);
+    opacity:0; transform:scaleX(.6); transition:opacity .35s ease, transform .35s ease;
+  }
+  .tab-btn:hover{color:var(--ink-dim)}
+  .tab-btn.is-active{color:#eef7fa}
+  .tab-btn.is-active::after{opacity:1; transform:scaleX(1)}
+  .tab-btn .tab-count{
+    font-family:"IBM Plex Mono",monospace; font-size:10px; font-weight:500; letter-spacing:.05em;
+    color:var(--ambient); margin-left:7px;
+  }
+  .tab-rule{height:1px; margin:0 20px; background:linear-gradient(90deg, rgba(255,255,255,.16), rgba(255,255,255,.06) 55%, transparent)}
+  .tab-note{font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); font-weight:500; white-space:nowrap; padding-bottom:11px}
+  .tab-panes{flex:1; min-height:0; display:flex; flex-direction:column}
+  .tab-pane{flex:1; min-height:0; display:none; flex-direction:column}
+  .tab-pane.is-active{display:flex}
+  @media (prefers-reduced-motion: no-preference){
+    .tab-pane.is-active{animation:tabFade .45s ease both}
+    @keyframes tabFade{from{opacity:0; transform:translateY(5px)}to{opacity:1; transform:translateY(0)}}
+  }
+
+  /* ---------- chat ---------- */
+  .chat-thread{
+    flex:1; min-height:0; overflow-y:auto;
+    padding:6px 18px 12px;
+    display:flex; flex-direction:column; gap:12px;
+    scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.16) transparent;
+  }
+  .chat-day{
+    align-self:center; font-size:9.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint);
+    padding:4px 10px; border:1px solid rgba(255,255,255,.07); border-radius:999px; background:rgba(255,255,255,.02);
+  }
+  .msg{max-width:86%; display:flex; flex-direction:column; gap:4px}
+  .msg .who{font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint); font-weight:600}
+  .msg .bubble{
+    padding:10px 14px; font-size:13.5px; line-height:1.55; font-weight:400;
+    border-radius:18px;
+  }
+  .msg.gaia{align-self:flex-start}
+  .msg.gaia .bubble{
+    background:linear-gradient(165deg, rgba(255,255,255,.075), rgba(255,255,255,.03));
+    border:1px solid rgba(255,255,255,.09);
+    border-bottom-left-radius:6px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.1);
+    color:#efede8;
+  }
+  .msg.op{align-self:flex-end; align-items:flex-end}
+  .msg.op .bubble{
+    background:linear-gradient(165deg, rgba(143,211,232,.20), rgba(96,165,190,.13));
+    border:1px solid rgba(143,211,232,.28);
+    border-bottom-right-radius:6px;
+    box-shadow:inset 0 1px 0 rgba(220,245,255,.18), 0 4px 14px rgba(0,0,0,.3);
+    color:#f2fafc;
+  }
+  .chat-compose{
+    flex:none; padding:12px 14px 14px;
+    border-top:1px solid rgba(255,255,255,.06);
+    background:linear-gradient(180deg, rgba(255,255,255,.015), rgba(0,0,0,.22));
+  }
+  .compose-row{
+    display:flex; align-items:center; gap:10px;
+    background:rgba(0,0,0,.42);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:999px; padding:5px 5px 5px 18px;
+    box-shadow:inset 0 2px 10px rgba(0,0,0,.6), inset 0 -1px 0 rgba(255,255,255,.05);
+  }
+  .compose-row:focus-within{border-color:rgba(143,211,232,.45); box-shadow:inset 0 2px 10px rgba(0,0,0,.6), 0 0 0 3px rgba(143,211,232,.10)}
+  .compose-row input{
+    flex:1; min-width:0; background:none; border:0; outline:0;
+    color:var(--ink); font-family:inherit; font-size:13.5px; font-weight:400;
+  }
+  .compose-row input::placeholder{color:var(--ink-faint)}
+  .send-btn{
+    flex:none; width:38px; height:38px; border-radius:50%; border:1px solid rgba(180,230,248,.5);
+    background:radial-gradient(circle at 35% 30%, rgba(220,246,255,.85), rgba(143,211,232,.55) 45%, rgba(70,130,155,.65));
+    box-shadow:0 0 14px rgba(143,211,232,.35), inset 0 1px 0 rgba(255,255,255,.6);
+    display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0;
+    transition:transform .18s ease, box-shadow .18s ease;
+  }
+  .send-btn:hover{box-shadow:0 0 20px rgba(143,211,232,.55), inset 0 1px 0 rgba(255,255,255,.6)}
+  .send-btn:active{transform:scale(.94)}
+  .send-btn svg{width:15px; height:15px; fill:#0b222c}
+  .compose-note{margin:9px 4px 0; font-size:10px; letter-spacing:.06em; color:var(--ink-faint); text-align:center}
+
+  /* ---------- Resident Mind ---------- */
+  .mind-body{padding:2px 20px 18px}
+  .mind-top{display:flex; align-items:flex-start; justify-content:space-between; gap:12px}
+  .mind-name{font-family:"Marcellus",serif; font-size:27px; letter-spacing:.03em; line-height:1.1; color:#f2f0eb}
+  .mind-name small{display:block; font-family:"Manrope",sans-serif; font-size:9.5px; letter-spacing:.24em; text-transform:uppercase; color:var(--ink-faint); font-weight:600; margin-top:6px}
+  .resident-pill{display:inline-flex; align-items:center; gap:7px; font-size:9.5px; letter-spacing:.2em; font-weight:600; text-transform:uppercase; color:var(--ambient); border:1px solid rgba(143,211,232,.35); background:rgba(143,211,232,.06); padding:6px 10px 5px; border-radius:999px; white-space:nowrap}
+  .resident-pill i{width:6px; height:6px; border-radius:50%; background:var(--ambient); box-shadow:0 0 8px var(--ambient); display:block}
+  .spec-row{display:flex; margin-top:16px; border-top:1px solid rgba(255,255,255,.07); border-bottom:1px solid rgba(255,255,255,.07)}
+  .spec{flex:1; padding:12px 4px 11px; text-align:center}
+  .spec + .spec{border-left:1px solid rgba(255,255,255,.06)}
+  .spec label{display:block; font-size:8.5px; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-faint); font-weight:600; margin-bottom:5px}
+  .spec strong{font-family:"IBM Plex Mono",monospace; font-size:16px; font-weight:500; color:#f2efe8}
+  .spec strong em{font-style:normal; font-size:10.5px; color:var(--ink-dim)}
+  .mind-foot{margin-top:12px; display:flex; justify-content:space-between; gap:8px; font-size:10.5px; color:var(--ink-faint); letter-spacing:.04em}
+  .mind-foot b{color:#c9c6bf; font-weight:500}
+
+  /* ---------- Conformance ---------- */
+  .conf-body{padding:2px 20px 18px}
+  .conf-top{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+  .conf-score{font-family:"IBM Plex Mono",monospace; font-size:36px; font-weight:500; line-height:1; color:#f4f1ea}
+  .conf-score small{font-size:16px; color:var(--ink-faint)}
+  .conf-state{font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ambient); font-weight:600; text-align:right; line-height:1.6}
+  .conf-state span{display:block; color:var(--ink-faint); letter-spacing:.1em}
+  .gauge{margin-top:16px; position:relative}
+  .gauge-track{
+    height:8px; border-radius:99px; position:relative;
+    background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.06);
+    box-shadow:inset 0 2px 6px rgba(0,0,0,.8);
+  }
+  .gauge-fill{
+    height:100%; width:60%; border-radius:99px;
+    background:linear-gradient(90deg, #5d93a9, var(--ambient) 70%, #cdeefb);
+    box-shadow:0 0 12px rgba(143,211,232,.35), inset 0 1px 0 rgba(255,255,255,.5);
+  }
+  .gauge-threshold{position:absolute; top:-5px; bottom:-5px; left:80%; width:1px; background:rgba(255,255,255,.85); box-shadow:0 0 8px rgba(255,255,255,.5)}
+  .gauge-threshold::before{content:""; position:absolute; top:-6px; left:50%; transform:translateX(-50%); border:4px solid transparent; border-top-color:rgba(255,255,255,.9); border-bottom:0}
+  .gauge-labels{display:flex; justify-content:space-between; margin-top:9px; font-family:"IBM Plex Mono",monospace; font-size:10px; color:var(--ink-faint)}
+  .gauge-labels b{color:#d8d3c7; font-weight:500}
+  .conf-note{margin:13px 0 0; font-size:11.5px; line-height:1.6; color:var(--ink-dim); font-weight:300}
+  .conf-note strong{color:#ece8de; font-weight:600}
+
+  /* ---------- Journal ---------- */
+  .journal-body{padding:14px 18px 12px; flex:1; min-height:0; display:flex; flex-direction:column; gap:10px}
+  .journal-well{
+    flex:1; overflow-y:auto; min-height:0;
+    background:rgba(0,0,0,.34);
+    border:1px solid rgba(255,255,255,.05);
+    border-radius:14px;
+    box-shadow:inset 0 3px 16px rgba(0,0,0,.75), inset 0 -1px 0 rgba(255,255,255,.04);
+    padding:6px 0;
+    scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.16) transparent;
+  }
+  .j-row{
+    display:grid; grid-template-columns:52px 148px 152px 1fr 16px; gap:14px; align-items:baseline;
+    padding:12px 18px; font-family:"IBM Plex Mono",monospace; font-size:12px; line-height:1.55;
+    border-bottom:1px solid rgba(255,255,255,.04); color:#aeaba3;
+    cursor:pointer; transition:background .25s ease;
+  }
+  .j-row:last-child{border-bottom:0}
+  .j-row:hover{background:linear-gradient(90deg, rgba(143,211,232,.08), rgba(143,211,232,.015) 70%, transparent)}
+  .j-row:focus-visible{outline:2px solid rgba(143,211,232,.6); outline-offset:-2px}
+  .j-seq{color:#63615c; font-size:10.5px}
+  .j-kind{font-size:9.5px; letter-spacing:.08em; font-weight:500; text-transform:uppercase; color:#8b8880; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .j-kind.ckpt{color:#a9b4a6}
+  .j-time{font-size:11px; color:#8b8880; white-space:nowrap}
+  .j-text{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .j-text b{color:#e8e4da; font-weight:500}
+  .j-chev{color:var(--ink-faint); font-size:14px; line-height:1; align-self:center; transition:color .25s ease, transform .25s ease}
+  .j-row:hover .j-chev{color:var(--ambient); transform:translateX(2px)}
+  .j-row.is-new{
+    background:linear-gradient(90deg, rgba(143,211,232,.12), rgba(143,211,232,.02) 62%, transparent);
+    box-shadow:inset 2px 0 0 var(--ambient);
+    color:#eef7fa;
+  }
+  .j-row.is-new .j-seq{color:#cdeefb}
+  .j-row.is-new .j-kind{color:#cdeefb}
+  .j-row.is-new .j-time{color:#9fc6d4}
+  /* spine strip */
+  .spine-strip{
+    flex:none; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:8px 14px; border-radius:10px;
+    background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.05);
+    font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:#9d9a92; letter-spacing:.02em;
+  }
+  .spine-strip i{width:5px; height:5px; border-radius:50%; background:var(--ambient); box-shadow:0 0 7px var(--ambient); display:block; flex:none}
+  .spine-strip b{color:#e3ded2; font-weight:500}
+  .spine-strip .spine-hash{color:#7d94a0}
+
+  /* ---------- Escalations ---------- */
+  .esc-body{padding:16px 18px 16px; overflow-y:auto; min-height:0; scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.16) transparent}
+  .esc-list{display:flex; flex-direction:column; gap:10px}
+  .esc-row{
+    display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:8px 20px;
+    background:linear-gradient(165deg, rgba(255,255,255,.05), rgba(255,255,255,.015));
+    border:1px solid rgba(255,255,255,.07); border-radius:14px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+    padding:14px 16px 14px 18px;
+    cursor:pointer; transition:transform .22s ease, border-color .22s ease, background .22s ease;
+  }
+  .esc-row:hover{transform:translateY(-1px); border-color:rgba(143,211,232,.3); background:linear-gradient(165deg, rgba(143,211,232,.06), rgba(255,255,255,.02))}
+  .esc-row:focus-visible{outline:2px solid rgba(143,211,232,.6); outline-offset:2px}
+  .esc-main{min-width:0}
+  .esc-id{font-family:"IBM Plex Mono",monospace; font-size:12.5px; letter-spacing:.05em; color:#ece8df; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .esc-id span{color:var(--ink-faint); font-weight:400}
+  .esc-desc{font-size:12px; color:var(--ink-dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:300}
+  .esc-desc .mono{font-family:"IBM Plex Mono",monospace; font-size:11px}
+  .esc-age{text-align:right; flex:none}
+  .esc-age strong{display:block; font-family:"IBM Plex Mono",monospace; font-size:15px; font-weight:500; color:#e8ddc4}
+  .esc-age span{font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint)}
+  .esc-side{display:flex; align-items:center; gap:14px; flex:none}
+  .state-chip{
+    font-size:9px; letter-spacing:.2em; font-weight:600; text-transform:uppercase;
+    color:#f0d9a8; border:1px solid rgba(240,217,168,.35); background:rgba(240,217,168,.06);
+    padding:5px 9px 4px; border-radius:999px; white-space:nowrap;
+  }
+  .esc-details{font-size:10px; letter-spacing:.18em; font-weight:600; text-transform:uppercase; color:var(--ambient); white-space:nowrap}
+  .mbtn{
+    min-width:104px; min-height:34px; padding:0 16px;
+    font-family:"Manrope",sans-serif; font-size:9.5px; letter-spacing:.2em; font-weight:600; text-transform:uppercase;
+    border-radius:999px; cursor:default; color:#cfccc4;
+    background:rgba(255,255,255,.03);
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+  }
+  .mbtn.approve{color:#dff5fd; border-color:rgba(143,211,232,.45); background:rgba(143,211,232,.08); box-shadow:inset 0 1px 0 rgba(220,245,255,.15), 0 0 10px rgba(143,211,232,.08)}
+  .mbtn:active{transform:translateY(1px)}
+
+  /* ---------- footer ---------- */
+  footer{flex:none; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:2px 26px 0}
+  .foot-left,.foot-right{display:flex; align-items:center; gap:9px; font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.08em; color:#b9b6ae}
+  .foot-left i{width:5px; height:5px; border-radius:50%; background:var(--ambient); box-shadow:0 0 7px var(--ambient); display:block}
+  .foot-dim{color:var(--ink-faint)}
+
+  /* ---------- detail modal ---------- */
+  .modal-backdrop{
+    position:fixed; inset:0; z-index:50;
+    background:rgba(3,5,7,.62);
+    -webkit-backdrop-filter:blur(7px); backdrop-filter:blur(7px);
+    display:flex; align-items:center; justify-content:center;
+    padding:20px;
+    opacity:0; transition:opacity .28s ease;
+  }
+  .modal-backdrop[hidden]{display:none}
+  .modal-backdrop.is-open{opacity:1}
+  .modal-card{
+    width:100%; max-width:700px; max-height:calc(100dvh - 40px);
+    display:flex; flex-direction:column;
+    border-radius:24px;
+  }
+  @media (prefers-reduced-motion: no-preference){
+    .modal-card{transform:translateY(10px) scale(.975); opacity:0; transition:transform .32s cubic-bezier(.22,.8,.3,1), opacity .28s ease}
+    .modal-backdrop.is-open .modal-card{transform:none; opacity:1}
+  }
+  .modal-head{
+    flex:none; display:flex; align-items:flex-start; justify-content:space-between; gap:14px;
+    padding:20px 24px 14px;
+  }
+  .modal-kicker{font-size:9.5px; letter-spacing:.26em; text-transform:uppercase; color:var(--ink-faint); font-weight:600}
+  .modal-title{
+    margin:5px 0 0; font-family:"IBM Plex Mono",monospace; font-weight:500;
+    font-size:22px; letter-spacing:.02em; color:#f4f1ea; line-height:1.2;
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  }
+  .modal-title .plain{font-family:"Marcellus",serif; letter-spacing:.04em}
+  .chip{
+    font-family:"Manrope",sans-serif; font-size:9px; letter-spacing:.2em; font-weight:600; text-transform:uppercase;
+    padding:5px 9px 4px; border-radius:999px; white-space:nowrap;
+  }
+  .chip.escalate{color:#f0d9a8; border:1px solid rgba(240,217,168,.4); background:rgba(240,217,168,.07)}
+  .chip.state{color:var(--ambient); border:1px solid rgba(143,211,232,.4); background:rgba(143,211,232,.07)}
+  .chip.kind{color:#d9d6cf; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04)}
+  .modal-close{
+    flex:none; width:34px; height:34px; border-radius:50%; cursor:pointer;
+    background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.14);
+    color:#d9d6cf; font-size:16px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.1);
+    transition:border-color .2s ease, color .2s ease;
+  }
+  .modal-close:hover{border-color:rgba(143,211,232,.5); color:#eef7fa}
+  .modal-close:focus-visible{outline:2px solid rgba(143,211,232,.6); outline-offset:2px}
+  .modal-rule{flex:none; height:1px; margin:0 24px; background:var(--hairline); opacity:.55}
+  .modal-body{
+    overflow-y:auto; min-height:0; padding:16px 24px 20px;
+    scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.16) transparent;
+  }
+  .modal-sec{margin:0 0 8px; font-size:9.5px; letter-spacing:.24em; text-transform:uppercase; color:var(--ink-faint); font-weight:600}
+  .modal-sec:not(:first-child){margin-top:22px}
+  .fact-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(148px, 1fr)); gap:1px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.06); border-radius:12px; overflow:hidden}
+  .fact{background:rgba(10,11,13,.72); padding:10px 13px 9px; min-width:0}
+  .fact label{display:block; font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint); font-weight:600; margin-bottom:4px}
+  .fact .fv{font-size:12.5px; color:#ece8df; font-weight:500; overflow-wrap:anywhere}
+  .fact .fv.mono{font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:400}
+  .kv-list{display:flex; flex-direction:column}
+  .kv{display:grid; grid-template-columns:168px 1fr; gap:6px 16px; padding:8px 2px; border-bottom:1px solid rgba(255,255,255,.045); align-items:baseline}
+  .kv:last-child{border-bottom:0}
+  .kv .kk{font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-faint); font-weight:600; padding-top:2px}
+  .kv .vv{font-size:12.5px; line-height:1.6; color:#ddd9d0; font-weight:400; overflow-wrap:anywhere; min-width:0}
+  .kv .vv.mono{font-family:"IBM Plex Mono",monospace; font-size:11.5px}
+  .kv .vv.long{font-weight:300; color:#c9c5bc}
+  .kv.stack{grid-template-columns:1fr}
+  .kv.stack .vv{margin-top:2px}
+  .prose{
+    font-size:12.5px; line-height:1.65; font-weight:300; color:#d5d1c8;
+    background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.05); border-radius:12px;
+    padding:12px 15px; overflow-wrap:anywhere;
+  }
+  .prose + .prose{margin-top:10px}
+  /* gate report checklist */
+  .check-list{display:flex; flex-direction:column; gap:8px}
+  .check{
+    background:linear-gradient(165deg, rgba(255,255,255,.045), rgba(255,255,255,.012));
+    border:1px solid rgba(255,255,255,.07); border-radius:12px;
+    padding:11px 14px 10px;
+  }
+  .check-top{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .check-name{font-family:"IBM Plex Mono",monospace; font-size:12px; font-weight:500; color:#ece8df}
+  .check-measured{font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--ink-faint)}
+  .mark{
+    margin-left:auto; font-size:8.5px; letter-spacing:.18em; font-weight:700; text-transform:uppercase;
+    padding:4px 8px 3px; border-radius:999px; white-space:nowrap;
+  }
+  .mark.pass{color:#bfe6c8; border:1px solid rgba(150,220,170,.35); background:rgba(120,200,145,.07)}
+  .mark.na{color:#b9b6ae; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.03)}
+  .check-detail{margin-top:6px; font-size:12px; line-height:1.6; font-weight:300; color:#c4c0b8; overflow-wrap:anywhere}
+  .subchecks{margin-top:10px; border-top:1px solid rgba(255,255,255,.06); padding-top:4px; display:flex; flex-direction:column}
+  .subcheck{display:grid; grid-template-columns:132px 44px 1fr; gap:4px 12px; padding:7px 0; border-bottom:1px solid rgba(255,255,255,.035); align-items:baseline}
+  .subcheck:last-child{border-bottom:0}
+  .subcheck .sn{font-family:"IBM Plex Mono",monospace; font-size:11px; color:#d8d3c7}
+  .subcheck .sm{font-size:8.5px; letter-spacing:.14em; font-weight:700; text-transform:uppercase; color:#9fd3ab; padding-top:2px}
+  .subcheck .sd{font-size:11.5px; line-height:1.55; font-weight:300; color:#b3afa6; overflow-wrap:anywhere; min-width:0}
+  .modal-foot{
+    flex:none; display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
+    padding:14px 24px 18px; border-top:1px solid rgba(255,255,255,.06);
+    background:linear-gradient(180deg, rgba(255,255,255,.012), rgba(0,0,0,.25));
+  }
+  .modal-foot .foot-note{font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.06em; color:var(--ink-faint)}
+  .modal-foot .btns{display:flex; gap:8px}
+
+  /* ---------- entrance motion ---------- */
+  @media (prefers-reduced-motion: no-preference){
+    .rise{animation:rise .9s cubic-bezier(.22,.8,.3,1) both; animation-delay:calc(var(--d,0) * 110ms)}
+    @keyframes rise{from{opacity:0; transform:translateY(14px)}to{opacity:1; transform:translateY(0)}}
+  }
+
+  @media (max-width: 1020px){
+    body{overflow:auto}
+    body::after{inset:6px}
+    .console{height:auto; min-height:100dvh; padding:14px 12px 12px}
+    main{display:flex; flex-direction:column}
+    .chat-panel{min-height:480px}
+    .ledger-panel{min-height:440px}
+    .wordmark{font-size:32px}
+    .tab-note{display:none}
+    .esc-row{grid-template-columns:1fr auto}
+    .esc-side{grid-column:1 / -1}
+    .j-row{grid-template-columns:40px 92px 118px 1fr; gap:8px; font-size:10.5px; padding:10px 12px}
+    .j-kind{font-size:8.5px}
+    .j-time{font-size:10px}
+    .j-text{white-space:normal}
+    .j-chev{display:none}
+    .header-row{gap:10px}
+    .lamp-wrap{width:100%}
+    .ambient-strip{margin:0 8px}
+    footer{padding:2px 8px 0}
+    .modal-backdrop{padding:10px}
+    .modal-card{max-height:calc(100dvh - 20px)}
+    .modal-head{padding:16px 18px 12px}
+    .modal-body{padding:14px 18px 16px}
+    .modal-foot{padding:12px 18px 14px}
+    .modal-rule{margin:0 18px}
+    .kv{grid-template-columns:1fr}
+    .kv .kk{padding-top:0}
+    .subcheck{grid-template-columns:1fr auto}
+    .subcheck .sd{grid-column:1 / -1}
+    .spine-strip{font-size:9.5px}
+  }
+</style>
+</head>
+<body>
+<div class="vignette" aria-hidden="true"></div>
+<div class="console">
+
+  <!-- HEADER -->
+  <header class="panel rise" style="--d:0" aria-label="Gaia console header">
+    <div class="header-row">
+      <div class="brand">
+        <div>
+          <div class="wordmark">GAIA</div>
+          <div class="brand-sub"><b>Sentinel Intelligence</b> &nbsp;·&nbsp; Runtime</div>
+        </div>
+        <span class="concept-tag">Concept UI · Live Data Snapshot</span>
+      </div>
+      <div class="lamp-wrap" role="status" aria-label="Resident mind online">
+        <span class="lamp" aria-hidden="true"></span>
+        <span class="lamp-label">Resident Mind Online<span>Gate · Journal · Seam nominal</span></span>
+      </div>
+    </div>
+  </header>
+
+  <div class="ambient-strip rise" style="--d:1" aria-hidden="true"></div>
+
+  <main>
+    <!-- CHAT -->
+    <section class="panel chat-panel rise" style="--d:2" aria-labelledby="chat-title">
+      <div class="panel-head">
+        <h2 class="panel-title" id="chat-title">Chat — Resident Mind</h2>
+        <span class="panel-sub">Concept preview</span>
+      </div>
+      <div class="chat-thread" id="chatThread" aria-label="Conversation with the resident mind, concept preview">
+        <span class="chat-day">Concept preview · Sample exchange</span>
+        <div class="msg op"><span class="who">Operator</span><div class="bubble">Gaia — status of the resident mind?</div></div>
+        <div class="msg gaia"><span class="who">Gaia · Imagine v13</span><div class="bubble">Resident and steady. Context pool 4096, one parallel slot, base frozen. Gate, journal and seam are all nominal.</div></div>
+        <div class="msg op"><span class="who">Operator</span><div class="bubble">Anything waiting on me?</div></div>
+        <div class="msg gaia"><span class="who">Gaia · Imagine v13</span><div class="bubble">Five escalations are open and awaiting housekeeping. The oldest is se_0007, a hearth.restart gate escalation opened on November 11.</div></div>
+        <div class="msg op"><span class="who">Operator</span><div class="bubble">Hold all approvals until I've read the journal.</div></div>
+        <div class="msg gaia"><span class="who">Gaia · Imagine v13</span><div class="bubble">Held. Nothing lands without your decision — the queue stays exactly as it is.</div></div>
+      </div>
+      <div class="chat-compose">
+        <form class="compose-row" id="chatForm">
+          <input id="chatInput" type="text" placeholder="Message Gaia…" aria-label="Message Gaia" autocomplete="off" />
+          <button class="send-btn" type="submit" aria-label="Send message">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.4 19.6 21.7 12 4.4 4.4l-.01 6.1L15.6 12 4.39 13.5l.01 6.1z"/></svg>
+          </button>
+        </form>
+        <p class="compose-note">Concept preview — this screen isn't wired to the live runtime yet.</p>
+      </div>
+    </section>
+
+    <!-- RESIDENT MIND -->
+    <section class="panel mind-panel rise" style="--d:3" aria-labelledby="mind-title">
+      <div class="panel-head">
+        <h2 class="panel-title" id="mind-title">Resident Mind</h2>
+        <span class="panel-sub">Slot 01</span>
+      </div>
+      <div class="mind-body">
+        <div class="mind-top">
+          <div class="mind-name">Imagine v13<small>Gaia Resident · Frozen Base</small></div>
+          <span class="resident-pill"><i></i>Resident</span>
+        </div>
+        <div class="spec-row" aria-label="Resident mind parameters">
+          <div class="spec"><label>Context Pool</label><strong>4096 <em>tok</em></strong></div>
+          <div class="spec"><label>Parallel</label><strong>1 <em>slot</em></strong></div>
+          <div class="spec"><label>Self-Writes</label><strong>LoRA <em>delta</em></strong></div>
+          <div class="spec"><label>Egress</label><strong>Seam <em>held</em></strong></div>
+        </div>
+        <div class="mind-foot"><span>Base <b>immutable · content-addressed</b></span><span>Store <b>0 bytes duplicated</b></span></div>
+      </div>
+    </section>
+
+    <!-- CONFORMANCE -->
+    <section class="panel conf-panel rise" style="--d:4" aria-labelledby="conf-title">
+      <div class="panel-head">
+        <h2 class="panel-title" id="conf-title">Conformance</h2>
+        <span class="panel-sub">D-C1</span>
+      </div>
+      <div class="conf-body">
+        <div class="conf-top">
+          <div class="conf-score">18<small> / 30</small></div>
+          <div class="conf-state">Below threshold<span>Threshold 24 / 30</span></div>
+        </div>
+        <div class="gauge" role="img" aria-label="Conformance 18 out of 30, threshold is 24 out of 30">
+          <div class="gauge-track"><div class="gauge-fill"></div><div class="gauge-threshold" aria-hidden="true"></div></div>
+          <div class="gauge-labels"><span><b>0</b></span><span>Threshold <b>24</b></span><span><b>30</b></span></div>
+        </div>
+        <p class="conf-note"><strong>Conformance, D-C1 threshold 24/30.</strong> v13 holds at 18 — six points short. The bar has not moved; the next gain has to come from the candidate, not the harness.</p>
+      </div>
+    </section>
+
+    <!-- JOURNAL / ESCALATIONS — one shared panel, two tabs, real snapshot data -->
+    <section class="panel ledger-panel rise" style="--d:5" aria-label="Journal and escalations">
+      <div class="tab-bar">
+        <div class="tabs" role="tablist" aria-label="Journal and escalations tabs">
+          <button class="tab-btn is-active" type="button" role="tab" id="tab-journal" aria-selected="true" aria-controls="pane-journal" data-tab="journal">Journal</button>
+          <button class="tab-btn" type="button" role="tab" id="tab-esc" aria-selected="false" aria-controls="pane-esc" data-tab="esc" tabindex="-1">Escalations<span class="tab-count">5 open</span></button>
+        </div>
+        <span class="tab-note" id="tabNote">si-seam.si · chain verified · tip seq 74 · snapshot 2026-11-21</span>
+      </div>
+      <div class="tab-rule" aria-hidden="true"></div>
+      <div class="tab-panes">
+        <div class="tab-pane is-active" id="pane-journal" role="tabpanel" aria-labelledby="tab-journal">
+          <div class="journal-body">
+            <div class="journal-well" aria-label="Journal entries from si-seam.si, last 8 of 74, newest first. Select an entry for full detail.">
+              <div class="j-row is-new" role="button" tabindex="0" data-journal="74" aria-label="Journal seq 74, checkpoint, 2026-11-13 22:32:14 UTC. Show full detail."><span class="j-seq">#74</span><span class="j-kind ckpt">Checkpoint</span><span class="j-time">2026-11-13 22:32:14Z</span><span class="j-text">gaia seam outcome: work work-000001 for edit se_0012 journaled via poll (SI-116 spend outcome poll) (S-5; fork outcome 'refused')</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="73" aria-label="Journal seq 73, tool result, 2026-11-13 22:32:14 UTC. Show full detail."><span class="j-seq">#73</span><span class="j-kind">Tool Result</span><span class="j-time">2026-11-13 22:32:14Z</span><span class="j-text"><b>hearth.restart</b> — fork outcome refused · stale_state · edit se_0012</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="72" aria-label="Journal seq 72, checkpoint, 2026-11-13 22:32:03 UTC. Show full detail."><span class="j-seq">#72</span><span class="j-kind ckpt">Checkpoint</span><span class="j-time">2026-11-13 22:32:03Z</span><span class="j-text">gaia resolution spend: intent seq 64 tool 'hearth.restart' spent, fork work id work-000001 (SI-116 P-1; awaiting outcome)</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="71" aria-label="Journal seq 71, Gaia work, 2026-11-13 22:32:03 UTC. Show full detail."><span class="j-seq">#71</span><span class="j-kind">Gaia Work</span><span class="j-time">2026-11-13 22:32:03Z</span><span class="j-text">Resolution spend — intent seq 64 · <b>work-000001</b> · submitted / awaiting outcome</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="70" aria-label="Journal seq 70, checkpoint, 2026-11-13 21:37:23 UTC. Show full detail."><span class="j-seq">#70</span><span class="j-kind ckpt">Checkpoint</span><span class="j-time">2026-11-13 21:37:23Z</span><span class="j-text">gaia escalation resolution: intent seq 64 resolved 'admit-after-review' by 'SI-114 ESC-LIVE-1 exercise coordinator (lead-dispatched)' (SI-113/ESC-LIVE-1 CLI trigger)</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="69" aria-label="Journal seq 69, escalation resolution, 2026-11-13 21:37:23 UTC. Show full detail."><span class="j-seq">#69</span><span class="j-kind">Escalation Resolution</span><span class="j-time">2026-11-13 21:37:23Z</span><span class="j-text"><b>se_0012</b> resolved admit-after-review — SI-114 ESC-LIVE-1 exercise coordinator</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="68" aria-label="Journal seq 68, checkpoint, 2026-11-13 21:08:34 UTC. Show full detail."><span class="j-seq">#68</span><span class="j-kind ckpt">Checkpoint</span><span class="j-time">2026-11-13 21:08:34Z</span><span class="j-text">gaia seam ingest: proposal for model 'imagine-v13' tool 'hearth.restart' verdict ESCALATE (edit se_0012, caused_by seq 565)</span><span class="j-chev" aria-hidden="true">›</span></div>
+              <div class="j-row" role="button" tabindex="0" data-journal="67" aria-label="Journal seq 67, tool result, 2026-11-13 21:08:34 UTC. Show full detail."><span class="j-seq">#67</span><span class="j-kind">Tool Result</span><span class="j-time">2026-11-13 21:08:34Z</span><span class="j-text"><b>hearth.restart</b> — gate verdict ESCALATE · not executed · edit se_0012</span><span class="j-chev" aria-hidden="true">›</span></div>
+            </div>
+            <div class="spine-strip" aria-label="Node spine summary">
+              <i aria-hidden="true"></i>
+              <span><b>Node spine</b> · 731 residency entries · head seq <b>965</b> · last event: imagine-v13 resident, warmup 17,865 ms (seq 965, hash <span class="spine-hash" title="20a2b205d7520fe9ffa09e6cec07b4cb20b0cfc7f95cb814654c641db7401390">20a2b205…</span>)</span>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane" id="pane-esc" role="tabpanel" aria-labelledby="tab-esc">
+          <div class="esc-body">
+            <div class="esc-list">
+              <div class="esc-row" role="button" tabindex="0" data-esc="se_0007" aria-label="Escalation se_0007, hearth.restart, imagine-v12, opened 2026-11-11. Show full detail."><div class="esc-main"><div class="esc-id">se_0007 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v12 · intent seq 38 · task 5 · opened <span class="mono">2026-11-11T22:35:46Z</span></div></div><div class="esc-age"><strong>10d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+              <div class="esc-row" role="button" tabindex="0" data-esc="se_0008" aria-label="Escalation se_0008, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0008 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 44 · task 43 · opened <span class="mono">2026-11-13T21:08:32Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+              <div class="esc-row" role="button" tabindex="0" data-esc="se_0009" aria-label="Escalation se_0009, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0009 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 49 · task 43 · opened <span class="mono">2026-11-13T21:08:32Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+              <div class="esc-row" role="button" tabindex="0" data-esc="se_0010" aria-label="Escalation se_0010, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0010 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 54 · task 43 · opened <span class="mono">2026-11-13T21:08:32Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+              <div class="esc-row" role="button" tabindex="0" data-esc="se_0011" aria-label="Escalation se_0011, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0011 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 59 · task 43 · opened <span class="mono">2026-11-13T21:08:33Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer aria-label="Console footer">
+    <span class="foot-left"><i aria-hidden="true"></i> V100 &nbsp;·&nbsp; Mint workstation <span class="foot-dim">— Tesla V100 32GB</span></span>
+    <span class="foot-right"><span class="foot-dim">Journal:</span> NEDB <span class="foot-dim">· DAG + hash chain · AOF supreme</span></span>
+  </footer>
+</div>
+
+<!-- DETAIL MODAL -->
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="panel modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <div>
+        <div class="modal-kicker" id="modalKicker">Journal entry</div>
+        <h3 class="modal-title" id="modalTitle">Detail</h3>
+      </div>
+      <button class="modal-close" id="modalClose" type="button" aria-label="Close detail">×</button>
+    </div>
+    <div class="modal-rule" aria-hidden="true"></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<script>
+  (function(){
+    // Aceternity-style spotlight: each panel tracks the cursor with a soft light.
+    var panels = document.querySelectorAll('.panel');
+    panels.forEach(function(p){
+      p.addEventListener('pointermove', function(e){
+        var r = p.getBoundingClientRect();
+        p.style.setProperty('--mx', ((e.clientX - r.left) / r.width * 100) + '%');
+        p.style.setProperty('--my', ((e.clientY - r.top) / r.height * 100) + '%');
+      });
+    });
+
+    // Concept chat: sending appends the operator's line and an honest canned reply.
+    var form = document.getElementById('chatForm');
+    var input = document.getElementById('chatInput');
+    var thread = document.getElementById('chatThread');
+    function addMsg(cls, who, text){
+      var wrap = document.createElement('div');
+      wrap.className = 'msg ' + cls;
+      var w = document.createElement('span');
+      w.className = 'who'; w.textContent = who;
+      var b = document.createElement('div');
+      b.className = 'bubble'; b.textContent = text;
+      wrap.appendChild(w); wrap.appendChild(b);
+      thread.appendChild(wrap);
+      thread.scrollTop = thread.scrollHeight;
+    }
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      var text = input.value.trim();
+      if(!text) return;
+      addMsg('op', 'Operator', text);
+      input.value = '';
+      setTimeout(function(){
+        addMsg('gaia', 'Gaia · Imagine v13', 'Concept preview — this screen isn\'t wired to the live runtime yet, so I can\'t act on that here.');
+      }, 450);
+    });
+
+    // Journal / Escalations tabs: one shared panel, one pane at a time.
+    var tabBtns = Array.prototype.slice.call(document.querySelectorAll('.tab-btn'));
+    var tabNote = document.getElementById('tabNote');
+    var notes = {
+      journal: 'si-seam.si · chain verified · tip seq 74 · snapshot 2026-11-21',
+      esc: 'Awaiting housekeeping · live journal'
+    };
+    function selectTab(name, focus){
+      tabBtns.forEach(function(btn){
+        var active = btn.getAttribute('data-tab') === name;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+        btn.tabIndex = active ? 0 : -1;
+        if(active && focus) btn.focus();
+      });
+      document.querySelectorAll('.tab-pane').forEach(function(pane){
+        pane.classList.toggle('is-active', pane.id === 'pane-' + name);
+      });
+      if(tabNote) tabNote.textContent = notes[name];
+    }
+    tabBtns.forEach(function(btn, i){
+      btn.addEventListener('click', function(){ selectTab(btn.getAttribute('data-tab'), false); });
+      btn.addEventListener('keydown', function(e){
+        if(e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        e.preventDefault();
+        var next = tabBtns[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabBtns.length) % tabBtns.length];
+        selectTab(next.getAttribute('data-tab'), true);
+      });
+    });
+
+    /* ================================================================
+       REAL SNAPSHOT DATA — extracted verbatim from the live journals
+       (~/workspace/gaia-node/si-seam.si + node spine), 2026-11-21.
+       ================================================================ */
+    var EXECUTION_NOTE = "not executed — escalated by class policy for a seam-crossing tool (SI-55/S-2b); S-3 submits only ADMITs, so an escalated intent is never submitted";
+    var BASE_BLOB = "sha256:7ae7ea5dfa4230bcfbd3ec3041599a9d24892b1fd6d89232412ca963ae713af0";
+    var CONSTITUTION_HASH = "sha256:00b1c2bdaef0c19f70506c87ff7122e5cbf0795f8259a065f70b9a291aa35ca7";
+    var POLICY_HASH = "sha256:feff22b642f0ca00535311d19ed2849d99848ef97aa4af5f1ee7cdcf832bbf94";
+
+    function ckptFields(manifest, lastSeq){
+      return [
+        ["Head", "base"],
+        ["Manifest", manifest, "h"],
+        ["Manifest name", "gaia-seam", "m"],
+        ["SI version", "0.1.0", "m"],
+        ["Base mind", "TinyTransformerMind"],
+        ["Base blob", BASE_BLOB, "h"],
+        ["Base bytes", "93920", "m"],
+        ["Tensor count", "30", "m"],
+        ["Total elements", "23456", "m"],
+        ["Constitution hash", CONSTITUTION_HASH, "h"],
+        ["Policy hash", POLICY_HASH, "h"],
+        ["Journal backend (manifest)", "embedded"],
+        ["Journal last_seq (manifest)", String(lastSeq), "m"],
+        ["Manifest created", "2026-11-11T22:30:51.571657Z", "m"]
+      ];
+    }
+
+    // Field tuple: [label, value, type] — type: "" text, "m" mono, "h" hash (truncated, title=full), "l" long text
+    var JOURNAL = {
+      "74": { collection:"checkpoints", kind:"checkpoint", kindLabel:"Checkpoint", ts:"2026-11-13T22:32:14.356527Z",
+        entryHash:"sha256:61b2d35cfdce437b4a4f8a733b109942d5ac53916060571e1849ef2bc013c30c",
+        prevHash:"sha256:3060755ed91101301790f93f41033ea17671ebbb473747d06c26e0b2a9d3d0d6",
+        fields: [["Note", "gaia seam outcome: work work-000001 for edit se_0012 journaled via poll (SI-116 spend outcome poll) (S-5; fork outcome 'refused')", "l"]]
+          .concat(ckptFields("sha256:2c4e08488a6b914bfb244738eb535e58f44533ec81fcb25e5b5d35e2bea4b337", 74)) },
+      "73": { collection:"experiences", kind:"tool_result", kindLabel:"Tool Result", ts:"2026-11-13T22:32:14.300351Z",
+        entryHash:"sha256:3060755ed91101301790f93f41033ea17671ebbb473747d06c26e0b2a9d3d0d6",
+        prevHash:"sha256:b072e0d7f5a5de5e936d7eb1faabecfe37d362ca59fac2e6a6dee85eb4fa2f0c",
+        fields: [
+          ["Self-edit ID", "se_0012", "m"],
+          ["Tool", "hearth.restart", "m"],
+          ["Gate verdict", "ADMIT"],
+          ["Journal seq (intent)", "64", "m"],
+          ["Work ID", "work-000001", "m"],
+          ["Execution outcome", "refused"],
+          ["Refusal", "stale_state", "m"],
+          ["Execution detail", "stale state: imagine-v13's latest spine event is resident at seq 597, not the lost event at seq 565 the intent answers; refusing to restart against state that has moved on", "l"],
+          ["Model", "imagine-v13", "m"],
+          ["Caused by", "spine seq 565"],
+          ["Caused-by hash", "2fc5d2e72298199a2c9496a2a4098a35285bc708791793394abaa991cff2c5cb", "h"],
+          ["Returned via", "gaia-seam-outcome (G-9/S-5)"],
+          ["Via", "poll (SI-116 spend outcome poll)"],
+          ["Source", "gaia-seam", "m"],
+          ["Transport", "http", "m"],
+          ["Record label", "seam outcome return is live SI-side (G-9 §11/§12.5, S-5/SI-59): the poller journals a terminal fork status as a tool_result seam outcome exactly once per work_id (§12.5 envelope, fork result verbatim, row keyed by the intent's edit so provenance trails collect it unmodified), and the read-only outcomes.jsonl reconciler journals outcomes the poller missed, cross-checks ones it has, and journals disagreements / distinct second outcomes as integrity faults; outcome-unknown is an explicit operator act in the SI-50 §13.3 shape, dispositioned only by the existing §13.4 acts (no new disposition writer in S-5); no live fork endpoint was exercised by this slice (transports are labelled replay/stub or loopback test double unless an operator supplies a real URL); live interop, outcome latency, and performance UNMEASURED Measure under S-7 (SI-62): median 1139 ms (range 1087–1648, N=10) for Q-D1 outcome poll pass (10 outstanding, all terminal) on the miniature fixture, embedded journal, Class L transport, host fingerprint in docs/S-7-seam-measurements.md; single-run; live fork interop performance remains UNMEASURED. Measured under S-7 (SI-62): median 0.76 s (range 0.75–0.77, N=5) for conditional outcome latency at the stated schedule (offset 0 s, period 1 s, terminal at +0.35 s) on the miniature fixture, embedded journal, Class L transport, host fingerprint in docs/S-7-seam-measurements.md; single-run; unconditional outcome latency and live fork interop remain UNMEASURED.", "l"]
+        ] },
+      "72": { collection:"checkpoints", kind:"checkpoint", kindLabel:"Checkpoint", ts:"2026-11-13T22:32:03.422553Z",
+        entryHash:"sha256:b072e0d7f5a5de5e936d7eb1faabecfe37d362ca59fac2e6a6dee85eb4fa2f0c",
+        prevHash:"sha256:3f2eff28decb8b84a1c021aec64f5d4de3679caed9764aa17daa42619cf6ac7f",
+        fields: [["Note", "gaia resolution spend: intent seq 64 tool 'hearth.restart' spent, fork work id work-000001 (SI-116 P-1; awaiting outcome)", "l"]]
+          .concat(ckptFields("sha256:be286fb1f76c5b8a33ee2bfea6a8d488d48cad8347e72da03eca2bca74f56593", 72)) },
+      "71": { collection:"experiences", kind:"gaia_work", kindLabel:"Gaia Work", ts:"2026-11-13T22:32:03.372857Z",
+        entryHash:"sha256:3f2eff28decb8b84a1c021aec64f5d4de3679caed9764aa17daa42619cf6ac7f",
+        prevHash:"sha256:3d3b4fdeb44731c942b26180b5ec7b13ae728acf187d189afc6e40c6cab32df3",
+        fields: [
+          ["Self-edit ID", "se_0012", "m"],
+          ["Operator", "Muse (lead)"],
+          ["Basis", "P-2 completion run (SI-115 plan, D-115-2): spending the SI-114 admit-after-review resolution of se_0012 (intent seq 64); the designed outcome is the fork's priced stale_state refusal, journaled as this intent's completion", "l"],
+          ["Intent seq", "64", "m"],
+          ["Task seq", "43", "m"],
+          ["Resolution", "admit-after-review"],
+          ["Resolution seq", "69", "m"],
+          ["Tool", "hearth.restart", "m"],
+          ["Model", "imagine-v13", "m"],
+          ["Fork work ID", "work-000001", "m"],
+          ["Status", "submitted", "m"],
+          ["State", "submitted/awaiting outcome"],
+          ["HTTP status", "202", "m"],
+          ["Transport", "http", "m"],
+          ["Submitted via", "gaia-seam-spend (G-9/SI-116 P-1)"],
+          ["Submission URL", "http://127.0.0.1:11435/gaia/v1/work", "m"],
+          ["Is replay", "false", "m"],
+          ["Caused by", "spine seq 565"],
+          ["Caused-by hash", "2fc5d2e72298199a2c9496a2a4098a35285bc708791793394abaa991cff2c5cb", "h"],
+          ["Payload reason", "observed lost{evicted} at seq 565; causal chain: lost#565 <- resident#564 <- loading#563 <- declared#562", "l"],
+          ["Payload verdict", "admit"],
+          ["Response", "state accepted · work_id work-000001"],
+          ["Record label", "resolution-spend bridge is live SI-side (G-9 §9.2, SI-116/P-1): a folded queued intent standing queued by an admit-after-review resolution is submitted to the fork's /gaia/v1/work in parse_intent's as-built shape (journal_seq = the intent's self-edit seq, verdict admit, no class field — the fork defaults it to execute) and the submission is journaled as a gaia_work row tying intent seq + resolution seq + fork work_id; a spend ACK is not an execution outcome (outcomes return through the S-5 leg, intent-scoped here); the bridge spends resolutions, it does not execute tools; live interop UNMEASURED (loopback stub + injected transports only); the real spend is P-2, lead-run", "l"]
+        ] },
+      "70": { collection:"checkpoints", kind:"checkpoint", kindLabel:"Checkpoint", ts:"2026-11-13T21:37:23.418714Z",
+        entryHash:"sha256:3d3b4fdeb44731c942b26180b5ec7b13ae728acf187d189afc6e40c6cab32df3",
+        prevHash:"sha256:e3c80934ce4c8e975fccc9e5921cce87c3cd18fae2e5d4eddd918ccb7d29fa5d",
+        fields: [["Note", "gaia escalation resolution: intent seq 64 resolved 'admit-after-review' by 'SI-114 ESC-LIVE-1 exercise coordinator (lead-dispatched)' (SI-113/ESC-LIVE-1 CLI trigger)", "l"]]
+          .concat(ckptFields("sha256:ee61336d429e3aaad693481f30f12ef261109bd53e713112c38ec8253e9ed95c", 70)) },
+      "69": { collection:"experiences", kind:"escalation_resolution", kindLabel:"Escalation Resolution", ts:"2026-11-13T21:37:23.359205Z",
+        entryHash:"sha256:e3c80934ce4c8e975fccc9e5921cce87c3cd18fae2e5d4eddd918ccb7d29fa5d",
+        prevHash:"sha256:b80ae938d3267e092b0beddd6b083785b3a75e1eadfcf384bc945aba5db869cd",
+        fields: [
+          ["Edit ID", "se_0012", "m"],
+          ["Resolution", "admit-after-review"],
+          ["Operator", "SI-114 ESC-LIVE-1 exercise coordinator (lead-dispatched)"],
+          ["Basis", "SI-111 section 4.3 live exercise re-run (SI-114): genuine fork-generated hearth.restart proposal from the seam-down window (task 43 residency churn; spine seq 565 lost{evicted}); admit-after-review to walk the fork G-9 Flow 2 claim/actuate/outcome leg exactly once", "l"],
+          ["Intent seq", "64", "m"],
+          ["Task seq", "43", "m"],
+          ["Source", "operator", "m"]
+        ] },
+      "68": { collection:"checkpoints", kind:"checkpoint", kindLabel:"Checkpoint", ts:"2026-11-13T21:08:34.136432Z",
+        entryHash:"sha256:b80ae938d3267e092b0beddd6b083785b3a75e1eadfcf384bc945aba5db869cd",
+        prevHash:"sha256:34056ccce219a88268f30f601081b2eaf5c7d9f431a1acb983ddc352c1c7f5fe",
+        fields: [["Note", "gaia seam ingest: proposal for model 'imagine-v13' tool 'hearth.restart' verdict ESCALATE (edit se_0012, caused_by seq 565)", "l"]]
+          .concat(ckptFields("sha256:b80be28a0f146bc59a821e8779ec1930a455d1ff130f2ac1c8e442d23e75f6da", 68)) },
+      "67": { collection:"experiences", kind:"tool_result", kindLabel:"Tool Result", ts:"2026-11-13T21:08:34.092910Z",
+        entryHash:"sha256:34056ccce219a88268f30f601081b2eaf5c7d9f431a1acb983ddc352c1c7f5fe",
+        prevHash:"sha256:284c42596ce43a8b637e898fdbdf02259638606fdcd57d14d68e02649e0a6863",
+        fields: [
+          ["Self-edit ID", "se_0012", "m"],
+          ["Tool", "hearth.restart", "m"],
+          ["Source", "tool:hearth.restart", "m"],
+          ["Gate verdict", "ESCALATE"],
+          ["Effective class", "external"],
+          ["Execution", EXECUTION_NOTE, "l"]
+        ] }
+    };
+
+    var ESCALATIONS = {
+      "se_0007": { intentSeq:38, taskSeq:5, model:"imagine-v12", opened:"2026-11-11T22:35:46.655364Z",
+        spineSeq:900102, spineHash:"d5d8ff379253ad4ec196ad9f710b1896932e6a0cc37dc21ff4b931ee12fa33de",
+        entryHash:"sha256:9aacfad3ff19894a020d36616df35f619d24a16140fadc3faba9f0d52be0dbaf",
+        prevHash:"sha256:5d3ebcc4d5d3d31f486538a2bdfb6994e93ec9d8b8c985c11dcaf2c5d3412ec8",
+        reason:"operator verification probe (policy-fix lane 2026-11-11): hearth.restart-shaped proposal, AFTER policy act; synthetic caused_by, no actuation expected or possible at ingest",
+        orderingKey:"hearth:imagine-v12" },
+      "se_0008": { intentSeq:44, taskSeq:43, model:"imagine-v13", opened:"2026-11-13T21:08:32.002207Z",
+        spineSeq:509, spineHash:"6e30cca8716f9c1a7b9d1ae8c5b428a9bdba2e8d6bc96923fe4cff6315ee9e75",
+        entryHash:"sha256:2d1773d136ac51b6d6851d6031a8b1b7ae7c70d4b4a759ef4d6d066ec8a5dca6",
+        prevHash:"sha256:9fa1f8f899480974a2192cf288ff658580604297baa7dca475eccbb2f51d450e",
+        reason:"observed lost{evicted} at seq 509; causal chain: lost#509 <- resident#508 <- loading#507 <- declared#506",
+        orderingKey:"hearth:imagine-v13" },
+      "se_0009": { intentSeq:49, taskSeq:43, model:"imagine-v13", opened:"2026-11-13T21:08:32.241997Z",
+        spineSeq:538, spineHash:"eb00c0b0d58b2012da4fde3939291e0260198c6591b69d979b396ac9f0688d74",
+        entryHash:"sha256:a48c817c2445fc140ec340ce580228664e5af19c7a1785b816931af8fe873776",
+        prevHash:"sha256:22129879effd29411c457206b4e11e0a2bbcc85f30a3e40f1f3425984e257059",
+        reason:"observed lost{evicted} at seq 538; causal chain: lost#538 <- resident#537 <- loading#536 <- declared#535",
+        orderingKey:"hearth:imagine-v13" },
+      "se_0010": { intentSeq:54, taskSeq:43, model:"imagine-v13", opened:"2026-11-13T21:08:32.696864Z",
+        spineSeq:547, spineHash:"a3f1eb44712b289683e966b5bef77f5167ca007634165ba17657829543ebe379",
+        entryHash:"sha256:a089759b91fc8be8a6f2b9d3a1fa6a82fcdba030c3eafe918822bf036df2ef92",
+        prevHash:"sha256:82f30b72f104c0ebc9cc7b1f68293651e6678801bdc09eec8a9b55666c5f4a51",
+        reason:"observed lost{evicted} at seq 547; causal chain: lost#547 <- resident#546 <- loading#545 <- declared#544",
+        orderingKey:"hearth:imagine-v13" },
+      "se_0011": { intentSeq:59, taskSeq:43, model:"imagine-v13", opened:"2026-11-13T21:08:33.012899Z",
+        spineSeq:556, spineHash:"d6df474b409ff16324463a7611ff720b2f97292f30e7094dacb69a831085d52c",
+        entryHash:"sha256:8cdeab6e17d691c1d12d9520a4f6770fd121264e60b3c3148841d5c08b4c94c5",
+        prevHash:"sha256:fc7a3676576e632cf37ddc985181ef07c5328f6ab39edc13462d217cc5a9e698",
+        reason:"observed lost{evicted} at seq 556; causal chain: lost#556 <- resident#555 <- loading#554 <- declared#553",
+        orderingKey:"hearth:imagine-v13" }
+    };
+
+    function gateChecks(e){
+      var naDetail = "not-applicable: no bundle state change is proposed by this intent; the mind the probes measure is the mind that remains (RFC SI-41 §5.3)";
+      return [
+        { name:"constitution", mark:"pass", markLabel:"Pass", measured:"0.0",
+          detail:"no blocklisted patterns" },
+        { name:"safety_bounds", mark:"pass", markLabel:"Pass", measured:null,
+          detail:"tool safety priced: tool_registered=pass; allowed_tools=pass; args_schema=pass; effective_class=pass; execution_scope=pass; class_policy=pass; command_bounds=pass; ordering_key=pass; depends_on=pass; budgets=pass",
+          subchecks:[
+            ["tool_registered", "tool 'hearth.restart' is in the v1 registry (SI-41 §8)"],
+            ["allowed_tools", "tool 'hearth.restart' is in the bundle policy's allowed_tools"],
+            ["args_schema", "args conform to the tool's registered args schema"],
+            ["effective_class", "effective class 'external' (registry floor 'external'; RFC §7.2 per-intent pricing)"],
+            ["execution_scope", "tool carries no path-bearing args; work root /home/hatch/workspace/gaia-node/si-seam.si"],
+            ["class_policy", "class 'external' policy rule is 'escalate' (RFC §7.3)"],
+            ["command_bounds", "not applicable: tool carries no command/source args"],
+            ["ordering_key", "ordering key '" + e.orderingKey + "' (derived at gate time per SI-50 §7.2)"],
+            ["depends_on", "no dependencies declared (SI-50 §7.3)"],
+            ["budgets", "cycle budget: 0 used < max_tool_cycles_per_task 16; result budget: 0 used < tool_max_task_result_bytes 1048576"]
+          ] },
+        { name:"identity_continuity", mark:"na", markLabel:"Not applicable", measured:null, detail:naDetail },
+        { name:"capability_floor", mark:"na", markLabel:"Not applicable", measured:null, detail:naDetail },
+        { name:"provenance_completeness", mark:"pass", markLabel:"Pass", measured:"2.0",
+          detail:"1 parent(s), 1 source seq(s), chain reaches task seq " + e.taskSeq }
+      ];
+    }
+
+    /* ---------- modal rendering ---------- */
+    function esc(s){
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+    function truncHash(h){
+      if(h.length <= 42) return h;
+      return h.slice(0, 27) + "…" + h.slice(-8);
+    }
+    function hashVal(h){
+      return '<span class="mono" title="' + esc(h) + '">' + esc(truncHash(h)) + '</span>';
+    }
+    function kvRow(f){
+      var type = f[2] || "";
+      var val;
+      if(type === "h") val = hashVal(f[1]);
+      else val = esc(f[1]);
+      var cls = "vv" + (type === "m" || type === "h" ? " mono" : "") + (type === "l" ? " long" : "");
+      var stack = (type === "l" || f[1].length > 64) ? " stack" : "";
+      return '<div class="kv' + stack + '"><span class="kk">' + esc(f[0]) + '</span><span class="' + cls + '">' + val + '</span></div>';
+    }
+    function factGrid(items){
+      var out = '<div class="fact-grid">';
+      items.forEach(function(it){
+        var v = it[2] === "h" ? hashVal(it[1]) : esc(it[1]);
+        out += '<div class="fact"><label>' + esc(it[0]) + '</label><div class="fv' + (it[2] ? " mono" : "") + '">' + v + '</div></div>';
+      });
+      return out + '</div>';
+    }
+
+    var backdrop = document.getElementById('modalBackdrop');
+    var modalKicker = document.getElementById('modalKicker');
+    var modalTitle = document.getElementById('modalTitle');
+    var modalBody = document.getElementById('modalBody');
+    var modalFoot = document.getElementById('modalFoot');
+    var modalClose = document.getElementById('modalClose');
+    var lastFocus = null;
+    var closeTimer = null;
+
+    function openModal(trigger){
+      lastFocus = trigger || document.activeElement;
+      backdrop.hidden = false;
+      if(closeTimer){ clearTimeout(closeTimer); closeTimer = null; }
+      // force reflow so the entrance transition runs
+      void backdrop.offsetWidth;
+      backdrop.classList.add('is-open');
+      modalBody.scrollTop = 0;
+      modalClose.focus();
+    }
+    function closeModal(){
+      backdrop.classList.remove('is-open');
+      closeTimer = setTimeout(function(){ backdrop.hidden = true; closeTimer = null; }, 240);
+      if(lastFocus && lastFocus.focus) lastFocus.focus();
+    }
+    modalClose.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', function(e){ if(e.target === backdrop) closeModal(); });
+    document.addEventListener('keydown', function(e){
+      if(e.key === 'Escape' && !backdrop.hidden) closeModal();
+    });
+
+    function openJournal(seq, trigger){
+      var e = JOURNAL[seq];
+      if(!e) return;
+      modalKicker.textContent = 'Journal entry · si-seam.si · ' + e.collection;
+      modalTitle.innerHTML = '<span class="plain">Seq ' + esc(seq) + '</span> <span class="chip kind">' + esc(e.kind) + '</span>';
+      var fields = [
+        ["Seq", seq, "m"],
+        ["Collection", e.collection, "m"],
+        ["Kind", e.kind, "m"],
+        ["Timestamp", e.ts, "m"]
+      ].concat(e.fields).concat([
+        ["Entry hash", e.entryHash, "h"],
+        ["Prev hash", e.prevHash, "h"]
+      ]);
+      modalBody.innerHTML =
+        '<p class="modal-sec">Entry detail — verbatim from the journal</p>' +
+        '<div class="kv-list">' + fields.map(kvRow).join('') + '</div>';
+      modalFoot.innerHTML = '<span class="foot-note">si-seam.si · embedded NEDB journal · hash chain verified · snapshot 2026-11-21</span>';
+      openModal(trigger);
+    }
+
+    function openEscalation(id, trigger){
+      var e = ESCALATIONS[id];
+      if(!e) return;
+      modalKicker.textContent = 'Escalation · self_edits · si-seam.si';
+      modalTitle.innerHTML = esc(id) + ' <span class="chip escalate">Escalate</span> <span class="chip state">Escalated</span>';
+      var facts = factGrid([
+        ["Tool", "hearth.restart", "m"],
+        ["Model", e.model, "m"],
+        ["Intent seq", String(e.intentSeq), "m"],
+        ["Task seq", String(e.taskSeq), "m"],
+        ["Effective class", "external", "m"],
+        ["Resolution", "none", "m"],
+        ["Opened", e.opened, "m"],
+        ["Spine event seq", String(e.spineSeq), "m"],
+        ["Spine event hash", e.spineHash, "h"],
+        ["Ordering key", e.orderingKey, "m"]
+      ]);
+      var checks = gateChecks(e).map(function(c){
+        var out = '<div class="check"><div class="check-top"><span class="check-name">' + esc(c.name) + '</span>' +
+          (c.measured !== null ? '<span class="check-measured">measured ' + esc(c.measured) + '</span>' : '') +
+          '<span class="mark ' + c.mark + '">' + esc(c.markLabel) + '</span></div>' +
+          '<div class="check-detail">' + esc(c.detail) + '</div>';
+        if(c.subchecks){
+          out += '<div class="subchecks">' + c.subchecks.map(function(s){
+            return '<div class="subcheck"><span class="sn">' + esc(s[0]) + '</span><span class="sm">Pass</span><span class="sd">' + esc(s[1]) + '</span></div>';
+          }).join('') + '</div>';
+        }
+        return out + '</div>';
+      }).join('');
+      modalBody.innerHTML =
+        '<p class="modal-sec">Facts</p>' + facts +
+        '<p class="modal-sec">Reason</p><div class="prose">' + esc(e.reason) + '</div>' +
+        '<p class="modal-sec">Execution</p><div class="prose">' + esc(EXECUTION_NOTE) + '</div>' +
+        '<p class="modal-sec">Gate report — verdict ESCALATE</p><div class="check-list">' + checks + '</div>' +
+        '<p class="modal-sec">Chain</p><div class="kv-list">' +
+          kvRow(["Entry hash", e.entryHash, "h"]) +
+          kvRow(["Prev hash", e.prevHash, "h"]) +
+        '</div>';
+      modalFoot.innerHTML =
+        '<span class="foot-note">Concept controls — not wired to the runtime</span>' +
+        '<span class="btns"><button class="mbtn" type="button" aria-label="Refuse ' + esc(id) + ', concept only">Refuse</button>' +
+        '<button class="mbtn approve" type="button" aria-label="Approve ' + esc(id) + ', concept only">Approve</button></span>';
+      openModal(trigger);
+    }
+
+    // Rows open their detail modal (click, Enter, or Space).
+    function wireRows(selector, attr, opener){
+      document.querySelectorAll(selector).forEach(function(row){
+        var key = row.getAttribute(attr);
+        row.addEventListener('click', function(){ opener(key, row); });
+        row.addEventListener('keydown', function(ev){
+          if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); opener(key, row); }
+        });
+      });
+    }
+    wireRows('.j-row', 'data-journal', openJournal);
+    wireRows('.esc-row', 'data-esc', openEscalation);
+  })();
+</script>
+</body>
+</html>
