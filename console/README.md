@@ -44,7 +44,7 @@ here, so replies can take a while.
   inference endpoint — never to the seam egress (11437), never to the
   agency work API. Approving or refusing an escalation remains an
   operator act at the SI CLI; the console's Refuse/Approve buttons are
-  inert concept controls.
+  inert controls (resolutions not wired).
 
 ## Configuration
 
