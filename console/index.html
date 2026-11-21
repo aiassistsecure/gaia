@@ -521,6 +521,9 @@
   .kill-btn.armed{background:#a02c26; color:#fff; border-color:#e0655f}
   .kill-btn:disabled{opacity:.45; cursor:default}
   .kill-btn:focus-visible{outline:2px solid rgba(224,101,95,.7); outline-offset:2px}
+  .resume-btn{border-color:rgba(140,200,255,.45); color:#cfe8ff}
+  .resume-btn:hover{border-color:rgba(140,200,255,.9); color:#fff}
+  .resume-btn.armed{background:#1d4e79; color:#fff; border-color:#8cc8ff}
   .lamp-wrap.halted .lamp{background:#e0655f; box-shadow:0 0 12px rgba(224,101,95,.8)}
 
   /* ---------- commands tab ---------- */
@@ -600,6 +603,7 @@
       <div class="hdr-controls">
         <span class="aa-ind" id="aaInd" hidden><span class="aa-dot" aria-hidden="true"></span>Autoapprove</span>
         <button class="kill-btn" id="killBtn" type="button" aria-label="Killswitch: halt the agent on this node">Kill</button>
+        <button class="kill-btn resume-btn" id="resumeBtn" type="button" hidden aria-label="Resume: restart the agent on this node">Resume</button>
       </div>
     </div>
   </header>
@@ -1547,9 +1551,15 @@
     /* ---------- operator controls: autoapprove + killswitch ---------- */
     var aaInd = document.getElementById('aaInd');
     var killBtn = document.getElementById('killBtn');
+    var resumeBtn = document.getElementById('resumeBtn');
 
     function renderConfig(cfg){
       if(aaInd) aaInd.hidden = !cfg.autoapprove_active;
+      if(cfg.killed){
+        markNodeHalted();
+        if(killBtn) killBtn.hidden = true;
+        if(resumeBtn) resumeBtn.hidden = false;
+      }
     }
     fetchJson('/api/config', 8000).then(renderConfig).catch(function(){});
 
@@ -1594,9 +1604,9 @@
       modalBody.innerHTML =
         '<p class="modal-sec">' + (rep.dry_run ? 'What a kill would do — nothing was changed (GAIA_KILL_DRY_RUN=1)' : 'Verified post-state') + '</p>' +
         '<div class="kv-list">' + rows.map(kvRow).join('') + '</div>' +
-        '<p class="modal-sec">Watchdog limit</p><div class="prose">' + esc(rep.watchdog_note || '') + '</div>';
+        '<p class="modal-sec">Watchdog</p><div class="prose">' + esc(rep.watchdog_note || '') + '</div>';
       modalFoot.innerHTML = '<span class="foot-note">' +
-        (rep.dry_run ? 'Dry run — the node is untouched' : 'Revival: systemctl start gaia-node.service si-seam-service.service — or the watchdog does it') + '</span>';
+        (rep.dry_run ? 'Dry run — the node is untouched' : 'Durable stop — the kill marker holds the watchdog off until Resume') + '</span>';
       openModal(trigger);
     }
 
@@ -1620,7 +1630,11 @@
           killBtn.disabled = false;
           killBtn.classList.remove('armed');
           killBtn.textContent = 'Kill';
-          if(!rep.dry_run) markNodeHalted();
+          if(!rep.dry_run){
+            markNodeHalted();
+            killBtn.hidden = true;
+            if(resumeBtn) resumeBtn.hidden = false;
+          }
           openKillReport(rep, killBtn);
           fetchJson('/api/config', 8000).then(renderConfig).catch(function(){});
         }).catch(function(err){
@@ -1632,6 +1646,74 @@
           modalBody.innerHTML = '<div class="prose">' + esc(err.message) + '</div>';
           modalFoot.innerHTML = '<span class="foot-note">The node was not stopped by this attempt</span>';
           openModal(killBtn);
+        });
+      });
+    }
+
+    function restoreNodeUi(){
+      var wrap = document.querySelector('.lamp-wrap');
+      if(wrap){
+        wrap.classList.remove('halted');
+        var lbl = wrap.querySelector('.lamp-label');
+        if(lbl && lbl.childNodes.length) lbl.childNodes[0].textContent = 'Resident Mind Online';
+      }
+      if(modeTag) modeTag.textContent = 'LIVE · wired to this node';
+      if(killBtn){ killBtn.hidden = false; killBtn.disabled = false; killBtn.textContent = 'Kill'; }
+      if(resumeBtn) resumeBtn.hidden = true;
+    }
+
+    function openResumeReport(rep, trigger){
+      modalKicker.textContent = 'Resume';
+      modalTitle.innerHTML = '<span class="plain">' + (rep.node_up ? 'Node is back' : 'Resume attempted') + '</span>';
+      var rows = [];
+      rows.push(["Kill marker", rep.marker_error ? ('error: ' + rep.marker_error) : (rep.marker_removed ? 'removed' : 'was not present'), "m"]);
+      (rep.started_units || []).forEach(function(u){
+        rows.push(["Unit", u.unit + " — " + u.active + " / " + u.enabled, "m"]);
+      });
+      (rep.start_errors || []).forEach(function(e){
+        rows.push(["Start error", e.unit + ": " + e.error, "l"]);
+      });
+      (rep.ports_after || []).forEach(function(p){
+        rows.push(["Port " + p.port, p.listening ? "listening" : "NOT LISTENING", "m"]);
+      });
+      rows.push(["Node up (verified)", rep.node_up ? "yes" : "no", "m"]);
+      rows.push(["At", rep.at || "", "m"]);
+      modalBody.innerHTML = '<p class="modal-sec">Verified post-state</p><div class="kv-list">' + rows.map(kvRow).join('') + '</div>';
+      modalFoot.innerHTML = '<span class="foot-note">' + (rep.node_up ? 'The watchdog is free to heal the node again' : 'Check the unit states — resume did not verify') + '</span>';
+      openModal(trigger);
+    }
+
+    if(resumeBtn){
+      var resumeArmTimer = null;
+      resumeBtn.addEventListener('click', function(){
+        if(resumeBtn.disabled) return;
+        if(!resumeBtn.classList.contains('armed')){
+          resumeBtn.classList.add('armed');
+          resumeBtn.textContent = 'Confirm resume';
+          resumeArmTimer = setTimeout(function(){
+            resumeBtn.classList.remove('armed');
+            resumeBtn.textContent = 'Resume';
+          }, 4000);
+          return;
+        }
+        clearTimeout(resumeArmTimer);
+        resumeBtn.disabled = true;
+        resumeBtn.textContent = 'Resuming…';
+        postJson('/api/resume', {}).then(function(rep){
+          resumeBtn.disabled = false;
+          resumeBtn.classList.remove('armed');
+          resumeBtn.textContent = 'Resume';
+          if(rep.node_up) restoreNodeUi();
+          openResumeReport(rep, resumeBtn);
+        }).catch(function(err){
+          resumeBtn.disabled = false;
+          resumeBtn.classList.remove('armed');
+          resumeBtn.textContent = 'Resume';
+          modalKicker.textContent = 'Resume';
+          modalTitle.innerHTML = '<span class="plain">Resume failed</span>';
+          modalBody.innerHTML = '<div class="prose">' + esc(err.message) + '</div>';
+          modalFoot.innerHTML = '<span class="foot-note">The node was not restarted by this attempt</span>';
+          openModal(resumeBtn);
         });
       });
     }
