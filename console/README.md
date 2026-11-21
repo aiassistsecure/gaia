@@ -28,6 +28,7 @@ python3 console/server.py
 | `POST /api/chat` | `{message, history?}` → the resident model's reply |
 | `POST /api/resolve` | `{edit_id, resolution}` → journal an operator resolution (see below) |
 | `POST /api/kill` | `{}` → the killswitch (see below) |
+| `POST /api/resume` | `{}` → remove the kill marker and start the units again |
 
 On load the page fetches the APIs and renders **live** data; the header
 tag reads `LIVE · wired to this node`. If the APIs don't answer, the page
@@ -89,15 +90,13 @@ The header's **Kill** button (two clicks: arm, then confirm) calls
    whether each port in `GAIA_NODE_PORTS` (default 11435, 11436,
    11437) still listens.
 
-**Honest limit:** the `gaia-node-watchdog` hook polls every 120 s and
-starts either unit when it finds it inactive — it has no
-deliberate-stop marker (see `~/workspace/gaia-node/NODE.md`: its
-deliberate-stop self-heal is a designed behavior) — so a console kill
-halts the node *immediately* but the watchdog will revive it within
-~2 minutes unless the watchdog hook is also disabled (Hatch runtime
-state this server cannot toggle). Masking is not an alternative on
-this box: it is unavailable for these `/etc`-defined units, and a
-runtime mask does not shadow them (both verified 2026-11-21).
+**Durability:** since 2026-11-21 the watchdog honors a
+deliberate-stop marker at `~/workspace/gaia-node/console-kill.marker`
+(`GAIA_KILL_MARKER`). `POST /api/kill` writes the marker *before*
+stopping the units, so the watchdog skips recovery and the halt
+sticks. `POST /api/resume` removes the marker and starts the units
+again; the header shows a **Resume** button while the node is
+killed. Both endpoints return the verified post-state.
 
 `GAIA_KILL_DRY_RUN=1` makes `POST /api/kill` report what *would* be
 stopped — current unit states, port states, autoapprove state —

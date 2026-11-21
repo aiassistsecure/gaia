@@ -19,6 +19,8 @@ Endpoints
                             resolution (SI-92 act, via si_act.py)
     POST /api/kill          {} -> killswitch: autoapprove off + stop the
                             node's systemd units (see "Killswitch" below)
+    POST /api/resume        {} -> remove the kill marker and start the
+                            node's units again (see "Killswitch" below)
 
 Reads are read-only: the seam journal is read through the SI package's
 own read path (si_read.py: open + hash-chain verify + fold) in a
@@ -43,15 +45,15 @@ process immediately and stays off; (2) the node's systemd units
 (GAIA_NODE_UNITS, default "gaia-node.service si-seam-service.service")
 are stopped with systemctl, and the response reports the verified
 post-state (unit states, whether ports GAIA_NODE_PORTS still listen).
-HONEST LIMIT: the gaia-node-watchdog hook polls every 120 s and
-starts either unit when it finds it inactive — it has no
-deliberate-stop marker (NODE.md: its deliberate-stop self-heal is a
-designed behavior) — so a console kill halts the node immediately
-but the watchdog will revive it within ~2 minutes unless the
-watchdog hook is also disabled (Hatch runtime state this server
-cannot toggle) or the units are masked (masking is not available
-for these /etc-defined units on this systemd; verified 2026-11-21).
-GAIA_KILL_DRY_RUN=1 makes /api/kill report what WOULD be stopped,
+Durability: the gaia-node-watchdog hook polls every 120 s and
+starts either unit when it finds it inactive, but since 2026-11-21
+it honors a deliberate-stop marker (~/workspace/gaia-node/
+console-kill.marker, GAIA_KILL_MARKER): while the marker exists it
+skips recovery for both units. /api/kill writes the marker BEFORE
+stopping the units, so a console kill is durable. POST /api/resume
+removes the marker and starts the units again, returning the
+verified post-state. GAIA_KILL_DRY_RUN=1 makes /api/kill report
+what WOULD be stopped (and where the marker would be written),
 with current unit/port states, changing nothing.
 
 Configuration (environment):
@@ -70,6 +72,8 @@ Configuration (environment):
     GAIA_AUTOAPPROVE     "1" enables the autoapprove policy (default off)
     GAIA_AUTOAPPROVE_INTERVAL  poll seconds (default 3)
     GAIA_KILL_DRY_RUN    "1" makes POST /api/kill a no-op report
+    GAIA_KILL_MARKER     kill marker path (default
+                         ~/workspace/gaia-node/console-kill.marker)
     GAIA_NODE_UNITS      units the killswitch stops (space-separated)
     GAIA_NODE_PORTS      ports the killswitch verifies (comma-separated)
 """
@@ -103,6 +107,9 @@ AGENCY_BASE = os.environ.get("GAIA_NODE_AGENCY", "http://127.0.0.1:11435")
 AUTOAPPROVE_ENV = os.environ.get("GAIA_AUTOAPPROVE") == "1"
 AUTOAPPROVE_INTERVAL = float(os.environ.get("GAIA_AUTOAPPROVE_INTERVAL", "3"))
 KILL_DRY_RUN = os.environ.get("GAIA_KILL_DRY_RUN") == "1"
+KILL_MARKER = os.environ.get(
+    "GAIA_KILL_MARKER",
+    os.path.join(HOME, "workspace/gaia-node/console-kill.marker"))
 NODE_UNITS = os.environ.get(
     "GAIA_NODE_UNITS", "gaia-node.service si-seam-service.service").split()
 NODE_PORTS = [int(p) for p in os.environ.get(
@@ -131,7 +138,9 @@ def config_doc():
             "autoapprove_active": bool(_state["autoapprove_active"]),
             "autoapprove_interval_s": AUTOAPPROVE_INTERVAL,
             "kill_dry_run": KILL_DRY_RUN,
-            "killed": bool(_state["killed"]),
+            "kill_marker": KILL_MARKER,
+            "kill_marker_present": os.path.exists(KILL_MARKER),
+            "killed": bool(_state["killed"]) or os.path.exists(KILL_MARKER),
             "kill_report": _state["kill_report"],
             "node_units": NODE_UNITS,
             "node_ports": NODE_PORTS,
@@ -289,6 +298,8 @@ def kill_node():
     if KILL_DRY_RUN:
         return {
             "dry_run": True,
+            "would_write_marker": KILL_MARKER,
+            "marker_present_now": os.path.exists(KILL_MARKER),
             "would_disable_autoapprove": autoapprove_active(),
             "would_stop_units": before_units,
             "ports_now": before_ports,
@@ -296,7 +307,21 @@ def kill_node():
         }
     with _state_lock:
         _state["autoapprove_active"] = False
+    # The marker goes down BEFORE the units stop: the watchdog polls
+    # every 120 s and must never see a stopped unit without it.
+    marker_written = None
+    marker_error = None
+    try:
+        with open(KILL_MARKER, "w") as fh:
+            json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                            time.gmtime()),
+                       "source": "Gaia console killswitch"}, fh)
+        marker_written = KILL_MARKER
+    except Exception as exc:
+        marker_error = str(exc)
     stop_errors = []
+    if marker_error:
+        stop_errors.append({"unit": "(kill marker)", "error": marker_error})
     for unit in NODE_UNITS:
         try:
             rc, out, err = _systemctl("stop", unit, timeout=120)
@@ -315,6 +340,8 @@ def kill_node():
                    for p in NODE_PORTS]
     report = {
         "dry_run": False,
+        "marker_written": marker_written,
+        "marker_error": marker_error,
         "autoapprove_disabled": True,
         "stopped_units": after_units,
         "stop_errors": stop_errors,
@@ -330,13 +357,55 @@ def kill_node():
     return report
 
 
+def resume_node():
+    """Undo a kill: remove the marker first (so the watchdog is
+    free to heal), then start the units and verify."""
+    marker_removed = False
+    marker_error = None
+    try:
+        if os.path.exists(KILL_MARKER):
+            os.remove(KILL_MARKER)
+            marker_removed = True
+    except Exception as exc:
+        marker_error = str(exc)
+    start_errors = []
+    for unit in NODE_UNITS:
+        try:
+            rc, out, err = _systemctl("start", unit, timeout=120)
+            if rc != 0:
+                start_errors.append({"unit": unit, "error": err or out})
+        except Exception as exc:
+            start_errors.append({"unit": unit, "error": str(exc)})
+    after_units = [_unit_state(u) for u in NODE_UNITS]
+    for _ in range(10):
+        after_units = [_unit_state(u) for u in NODE_UNITS]
+        if all(u["active"] == "active" for u in after_units):
+            break
+        time.sleep(1)
+    after_ports = [{"port": p, "listening": _port_listening(p)}
+                   for p in NODE_PORTS]
+    report = {
+        "marker_removed": marker_removed,
+        "marker_error": marker_error,
+        "started_units": after_units,
+        "start_errors": start_errors,
+        "ports_after": after_ports,
+        "node_up": all(u["active"] == "active" for u in after_units),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if report["node_up"]:
+        with _state_lock:
+            _state["killed"] = False
+            _state["kill_report"] = None
+    return report
+
+
 WATCHDOG_NOTE = (
-    "the gaia-node-watchdog hook polls every 120 s and starts either "
-    "unit when it finds it inactive (no deliberate-stop marker; "
-    "NODE.md), so this halt is immediate but the watchdog will "
-    "revive the units within ~2 minutes unless the watchdog hook "
-    "is also disabled — Hatch runtime state this server cannot "
-    "toggle")
+    "the gaia-node-watchdog hook polls every 120 s, but it honors "
+    "the console kill marker (~/workspace/gaia-node/"
+    "console-kill.marker): while the marker exists it skips "
+    "recovery for both units, so this halt is durable until "
+    "Resume removes the marker and starts the units again")
 
 
 # ---------------------------------------------------------------- spine
@@ -511,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path not in ("/api/chat", "/api/resolve", "/api/kill"):
+        if path not in ("/api/chat", "/api/resolve", "/api/kill", "/api/resume"):
             return self._send_error_json("not found", status=404)
         try:
             doc = self._read_body()
@@ -522,6 +591,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(kill_node())
             except Exception as exc:
                 return self._send_error_json("kill failed: " + str(exc))
+        if path == "/api/resume":
+            try:
+                return self._send_json(resume_node())
+            except Exception as exc:
+                return self._send_error_json("resume failed: " + str(exc))
         if path == "/api/resolve":
             edit_id = (doc.get("edit_id") or "").strip()
             resolution = (doc.get("resolution") or "").strip()
