@@ -10,22 +10,56 @@ Endpoints
     GET  /                  console/index.html (and static files beside it)
     GET  /api/journal       seam journal tail (last 8, full fields), read-only
     GET  /api/escalations   folded open escalations + gate reports, read-only
+    GET  /api/commands      every tool intent in the journal, folded with
+                            its outcome — the agent's command history
     GET  /api/spine         spine totals/head/last event + residency, live node
+    GET  /api/config        console config state (autoapprove, kill state)
     POST /api/chat          {message} -> resident model's reply
+    POST /api/resolve       {edit_id, resolution} -> journal an operator
+                            resolution (SI-92 act, via si_act.py)
+    POST /api/kill          {} -> killswitch: autoapprove off + stop the
+                            node's systemd units (see "Killswitch" below)
 
-Read-only guarantees: the seam journal is read through the SI package's
+Reads are read-only: the seam journal is read through the SI package's
 own read path (si_read.py: open + hash-chain verify + fold) in a
-subprocess; the spine is read through the node's events endpoint. This
-server never writes to a journal, never resolves an escalation, and
-never posts to the seam egress (11437). Chat goes only to the resident
+subprocess; the spine is read through the node's events endpoint. The
+one write path is resolutions: si_act.py performs the SI-92 verifying
+act through si.gaia.escalation_cli.resolve — the same path as the
+`si gaia-escalation resolve` CLI. A resolution never rewrites a gate
+verdict; it is a separate journaled operator act. This server never
+posts to the seam egress (11437). Chat goes only to the resident
 model's llama-server endpoint, discovered live (see below).
+
+Autoapprove (GAIA_AUTOAPPROVE=1, default OFF): a resolution POLICY,
+never a gate bypass. The gate still escalates exactly what it
+escalates; while enabled, the server polls the pending escalations
+every few seconds and answers each with admit-after-review, credited
+to operator "autoapprove (env GAIA_AUTOAPPROVE)" with the basis
+recorded in si_act.py. The journal shows both halves: the ESCALATE
+verdict, untouched, and the separate autoapprove resolution.
+
+Killswitch (POST /api/kill): (1) autoapprove is disabled in this
+process immediately and stays off; (2) the node's systemd units
+(GAIA_NODE_UNITS, default "gaia-node.service si-seam-service.service")
+are stopped with systemctl, and the response reports the verified
+post-state (unit states, whether ports GAIA_NODE_PORTS still listen).
+HONEST LIMIT: the gaia-node-watchdog hook polls every 120 s and
+starts either unit when it finds it inactive — it has no
+deliberate-stop marker (NODE.md: its deliberate-stop self-heal is a
+designed behavior) — so a console kill halts the node immediately
+but the watchdog will revive it within ~2 minutes unless the
+watchdog hook is also disabled (Hatch runtime state this server
+cannot toggle) or the units are masked (masking is not available
+for these /etc-defined units on this systemd; verified 2026-11-21).
+GAIA_KILL_DRY_RUN=1 makes /api/kill report what WOULD be stopped,
+with current unit/port states, changing nothing.
 
 Configuration (environment):
     GAIA_CONSOLE_PORT    listen port (default 11440)
     GAIA_SEAM_BUNDLE     seam bundle dir (default ~/workspace/gaia-node/si-seam.si)
     GAIA_SI_PATH         SI package checkout (default ~/workspace/sentinel-main)
-    GAIA_SI_PYTHON       interpreter for si_read.py (default the seam
-                         service's venv python when present)
+    GAIA_SI_PYTHON       interpreter for si_read.py / si_act.py (default
+                         the seam service's venv python when present)
     GAIA_NODE_EVENTS     events endpoint (default http://127.0.0.1:11436/gaia/v1/events)
     GAIA_NODE_AGENCY     agency base (default http://127.0.0.1:11435)
     GAIA_MODEL_ENDPOINT  pin the model endpoint (e.g. http://127.0.0.1:44117);
@@ -33,11 +67,17 @@ Configuration (environment):
                          event, falling back to gaia.log
     GAIA_NODE_HOME       node home for the gaia.log fallback (default
                          ~/workspace/gaia-node)
+    GAIA_AUTOAPPROVE     "1" enables the autoapprove policy (default off)
+    GAIA_AUTOAPPROVE_INTERVAL  poll seconds (default 3)
+    GAIA_KILL_DRY_RUN    "1" makes POST /api/kill a no-op report
+    GAIA_NODE_UNITS      units the killswitch stops (space-separated)
+    GAIA_NODE_PORTS      ports the killswitch verifies (comma-separated)
 """
 
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -60,6 +100,43 @@ EVENTS_URL = os.environ.get(
     "GAIA_NODE_EVENTS", "http://127.0.0.1:11436/gaia/v1/events")
 AGENCY_BASE = os.environ.get("GAIA_NODE_AGENCY", "http://127.0.0.1:11435")
 
+AUTOAPPROVE_ENV = os.environ.get("GAIA_AUTOAPPROVE") == "1"
+AUTOAPPROVE_INTERVAL = float(os.environ.get("GAIA_AUTOAPPROVE_INTERVAL", "3"))
+KILL_DRY_RUN = os.environ.get("GAIA_KILL_DRY_RUN") == "1"
+NODE_UNITS = os.environ.get(
+    "GAIA_NODE_UNITS", "gaia-node.service si-seam-service.service").split()
+NODE_PORTS = [int(p) for p in os.environ.get(
+    "GAIA_NODE_PORTS", "11435,11436,11437").split(",") if p.strip()]
+
+# Runtime operator state: autoapprove starts as the env says; the
+# killswitch turns it off for the life of this process, whatever
+# the env says. Guarded by _state_lock.
+_state_lock = threading.Lock()
+_state = {
+    "autoapprove_active": AUTOAPPROVE_ENV,
+    "killed": False,
+    "kill_report": None,
+}
+
+
+def autoapprove_active():
+    with _state_lock:
+        return bool(_state["autoapprove_active"])
+
+
+def config_doc():
+    with _state_lock:
+        return {
+            "autoapprove_env": AUTOAPPROVE_ENV,
+            "autoapprove_active": bool(_state["autoapprove_active"]),
+            "autoapprove_interval_s": AUTOAPPROVE_INTERVAL,
+            "kill_dry_run": KILL_DRY_RUN,
+            "killed": bool(_state["killed"]),
+            "kill_report": _state["kill_report"],
+            "node_units": NODE_UNITS,
+            "node_ports": NODE_PORTS,
+        }
+
 
 def _default_si_python():
     candidate = os.path.join(HOME, "workspace/si2-venv/bin/python")
@@ -68,6 +145,7 @@ def _default_si_python():
 
 SI_PYTHON = os.environ.get("GAIA_SI_PYTHON") or _default_si_python()
 SI_READ = os.path.join(HERE, "si_read.py")
+SI_ACT = os.path.join(HERE, "si_act.py")
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -109,6 +187,156 @@ def run_si_read(mode):
     if proc.returncode != 0 or "error" in doc:
         raise RuntimeError("si_read failed: " + str(doc.get("error", proc.returncode)))
     return doc
+
+
+class SiRefusal(Exception):
+    """The SI layer refused the act; the message is its own, verbatim."""
+
+
+# All resolution acts (manual + autoapprove) serialize on this lock:
+# one verified act at a time against the journal, never two writers
+# racing the fold.
+_act_lock = threading.Lock()
+
+
+def run_si_act(args, timeout=180):
+    """Run the SI actor subprocess (si_act.py); returns its JSON
+    document. A refusal raises SiRefusal with the SI layer's own
+    message; anything else raises RuntimeError."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = SI_PATH
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [SI_PYTHON, SI_ACT] + args + [SEAM_BUNDLE],
+        capture_output=True, text=True, timeout=timeout, env=env)
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise RuntimeError("si_act produced no output: " +
+                           (proc.stderr or "").strip()[:300])
+    doc = json.loads(out)
+    if proc.returncode != 0 or "error" in doc:
+        raise SiRefusal(str(doc.get("error", proc.returncode)))
+    return doc
+
+
+def resolve_resolution(edit_id, resolution, operator, basis=""):
+    """One operator resolution, serialized. Returns the act's
+    document (resolution entry + folded intent after the act)."""
+    args = ["resolve", edit_id, resolution, operator]
+    if basis:
+        args.append(basis)
+    with _act_lock:
+        return run_si_act(args)
+
+
+def autoapprove_loop():
+    """The GAIA_AUTOAPPROVE policy: while active, answer every
+    pending escalation with admit-after-review (see header docs).
+    The gate is untouched; only resolutions are journaled, each
+    one a verified SI-92 act credited to the autoapprove operator."""
+    while True:
+        time.sleep(AUTOAPPROVE_INTERVAL)
+        if not autoapprove_active():
+            continue
+        try:
+            with _act_lock:
+                doc = run_si_act(["autoapprove"])
+            if doc.get("resolved"):
+                sys.stderr.write(
+                    "[console] autoapprove resolved: %s\n" % ", ".join(
+                        "%s@%s" % (r["edit_id"], r["resolution_seq"])
+                        for r in doc["resolved"]))
+            for err in doc.get("errors") or []:
+                sys.stderr.write("[console] autoapprove error on %s: %s\n"
+                                 % (err.get("edit_id"), err.get("error")))
+        except Exception as exc:
+            sys.stderr.write("[console] autoapprove pass failed: %s\n" % exc)
+
+
+# ------------------------------------------------------------------ kill
+
+def _systemctl(*args, timeout=30):
+    proc = subprocess.run(["systemctl"] + list(args),
+                          capture_output=True, text=True, timeout=timeout)
+    return proc.returncode, (proc.stdout or "").strip(), \
+        (proc.stderr or "").strip()
+
+
+def _unit_state(unit):
+    rc, out, _ = _systemctl("is-active", unit)
+    active = out or "unknown"
+    rc2, out2, _ = _systemctl("is-enabled", unit)
+    return {"unit": unit, "active": active, "enabled": out2 or "unknown"}
+
+
+def _port_listening(port):
+    sock = socket.socket()
+    sock.settimeout(1.5)
+    try:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        sock.close()
+
+
+def kill_node():
+    """The killswitch act. Returns the report document; the same
+    document is stored for /api/config. In dry-run mode nothing is
+    changed: the report lists what WOULD be stopped with the
+    current unit/port states."""
+    before_units = [_unit_state(u) for u in NODE_UNITS]
+    before_ports = [{"port": p, "listening": _port_listening(p)}
+                    for p in NODE_PORTS]
+    if KILL_DRY_RUN:
+        return {
+            "dry_run": True,
+            "would_disable_autoapprove": autoapprove_active(),
+            "would_stop_units": before_units,
+            "ports_now": before_ports,
+            "watchdog_note": WATCHDOG_NOTE,
+        }
+    with _state_lock:
+        _state["autoapprove_active"] = False
+    stop_errors = []
+    for unit in NODE_UNITS:
+        try:
+            rc, out, err = _systemctl("stop", unit, timeout=120)
+            if rc != 0:
+                stop_errors.append({"unit": unit, "error": err or out})
+        except Exception as exc:
+            stop_errors.append({"unit": unit, "error": str(exc)})
+    # Verified post-state: poll briefly for the units to settle.
+    after_units = before_units
+    for _ in range(10):
+        after_units = [_unit_state(u) for u in NODE_UNITS]
+        if all(u["active"] != "active" for u in after_units):
+            break
+        time.sleep(1)
+    after_ports = [{"port": p, "listening": _port_listening(p)}
+                   for p in NODE_PORTS]
+    report = {
+        "dry_run": False,
+        "autoapprove_disabled": True,
+        "stopped_units": after_units,
+        "stop_errors": stop_errors,
+        "ports_after": after_ports,
+        "node_down": all(u["active"] != "active" for u in after_units)
+                     and not any(p["listening"] for p in after_ports),
+        "watchdog_note": WATCHDOG_NOTE,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    with _state_lock:
+        _state["killed"] = True
+        _state["kill_report"] = report
+    return report
+
+
+WATCHDOG_NOTE = (
+    "the gaia-node-watchdog hook polls every 120 s and starts either "
+    "unit when it finds it inactive (no deliberate-stop marker; "
+    "NODE.md), so this halt is immediate but the watchdog will "
+    "revive the units within ~2 minutes unless the watchdog hook "
+    "is also disabled — Hatch runtime state this server cannot "
+    "toggle")
 
 
 # ---------------------------------------------------------------- spine
@@ -267,21 +495,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(run_si_read("journal"))
             if path == "/api/escalations":
                 return self._send_json(run_si_read("escalations"))
+            if path == "/api/commands":
+                return self._send_json(run_si_read("commands"))
+            if path == "/api/config":
+                return self._send_json(config_doc())
             if path == "/api/spine":
                 return self._send_json(get_spine())
         except Exception as exc:
             return self._send_error_json(str(exc))
         return self._serve_static(path)
 
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/api/chat":
+        if path not in ("/api/chat", "/api/resolve", "/api/kill"):
             return self._send_error_json("not found", status=404)
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            doc = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            doc = self._read_body()
         except Exception:
             return self._send_error_json("invalid JSON body", status=400)
+        if path == "/api/kill":
+            try:
+                return self._send_json(kill_node())
+            except Exception as exc:
+                return self._send_error_json("kill failed: " + str(exc))
+        if path == "/api/resolve":
+            edit_id = (doc.get("edit_id") or "").strip()
+            resolution = (doc.get("resolution") or "").strip()
+            if not edit_id or not resolution:
+                return self._send_error_json(
+                    "edit_id and resolution are required", status=400)
+            try:
+                return self._send_json(resolve_resolution(
+                    edit_id, resolution, "Mark (Gaia console)",
+                    basis=(doc.get("basis") or "").strip()))
+            except SiRefusal as exc:
+                # The SI layer's refusal, verbatim.
+                return self._send_error_json(str(exc), status=409)
+            except Exception as exc:
+                return self._send_error_json("resolve failed: " + str(exc))
         message = (doc.get("message") or "").strip()
         if not message:
             return self._send_error_json("message is required", status=400)
@@ -312,6 +567,13 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print("gaia console: http://127.0.0.1:%d (seam bundle %s)" % (PORT, SEAM_BUNDLE),
           flush=True)
+    if AUTOAPPROVE_ENV:
+        print("gaia console: AUTOAPPROVE on (GAIA_AUTOAPPROVE=1) — pending "
+              "escalations will be resolved admit-after-review", flush=True)
+        threading.Thread(target=autoapprove_loop, daemon=True).start()
+    if KILL_DRY_RUN:
+        print("gaia console: GAIA_KILL_DRY_RUN=1 — /api/kill reports only",
+              flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -496,6 +496,49 @@
   .modal-foot .foot-note{font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.06em; color:var(--ink-faint)}
   .modal-foot .btns{display:flex; gap:8px}
 
+  /* ---------- operator controls (header) ---------- */
+  .hdr-controls{display:flex; align-items:center; gap:12px; flex:none}
+  .aa-ind{
+    display:inline-flex; align-items:center; gap:8px;
+    font-size:9px; letter-spacing:.2em; font-weight:700; text-transform:uppercase;
+    color:#f0d9a8; border:1px solid rgba(240,217,168,.45); background:rgba(240,217,168,.08);
+    padding:7px 12px 6px; border-radius:999px; white-space:nowrap;
+  }
+  .aa-ind[hidden]{display:none}
+  .aa-dot{width:7px; height:7px; border-radius:50%; background:#f0c96a; box-shadow:0 0 10px rgba(240,201,106,.9)}
+  @media (prefers-reduced-motion: no-preference){
+    .aa-dot{animation:aaPulse 1.6s ease-in-out infinite}
+    @keyframes aaPulse{0%,100%{opacity:1}50%{opacity:.35}}
+  }
+  .kill-btn{
+    font-family:"Manrope",sans-serif; font-size:9.5px; letter-spacing:.22em; font-weight:700; text-transform:uppercase;
+    color:#f3b8b3; border:1px solid rgba(224,101,95,.55); background:rgba(224,101,95,.07);
+    padding:9px 16px 8px; border-radius:999px; cursor:pointer; white-space:nowrap;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+    transition:background .2s ease, color .2s ease, border-color .2s ease;
+  }
+  .kill-btn:hover{border-color:rgba(224,101,95,.9); color:#ffd9d5}
+  .kill-btn.armed{background:#a02c26; color:#fff; border-color:#e0655f}
+  .kill-btn:disabled{opacity:.45; cursor:default}
+  .kill-btn:focus-visible{outline:2px solid rgba(224,101,95,.7); outline-offset:2px}
+  .lamp-wrap.halted .lamp{background:#e0655f; box-shadow:0 0 12px rgba(224,101,95,.8)}
+
+  /* ---------- commands tab ---------- */
+  .vchip{
+    font-size:8.5px; letter-spacing:.18em; font-weight:700; text-transform:uppercase;
+    padding:4px 9px 3px; border-radius:999px; white-space:nowrap;
+  }
+  .vchip.admit{color:#bfe6c8; border:1px solid rgba(150,220,170,.4); background:rgba(120,200,145,.08)}
+  .vchip.reject{color:#f3b8b3; border:1px solid rgba(224,101,95,.45); background:rgba(224,101,95,.08)}
+  .vchip.escalate{color:#f0d9a8; border:1px solid rgba(240,217,168,.4); background:rgba(240,217,168,.07)}
+  .cmd-outcome{display:flex; flex-direction:column; align-items:flex-end; gap:2px; text-align:right}
+  .cmd-outcome strong{font-size:12px; font-weight:600; color:#ece8df; white-space:nowrap}
+  .cmd-outcome span{font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); font-weight:600}
+  .chip.reject{color:#f3b8b3; border:1px solid rgba(224,101,95,.45); background:rgba(224,101,95,.08)}
+  .mbtn.confirm{background:#a02c26; color:#fff; border-color:#e0655f}
+  .mbtn:disabled{opacity:.45; cursor:default}
+  .resolve-err{color:#f3b8b3 !important}
+
   /* ---------- entrance motion ---------- */
   @media (prefers-reduced-motion: no-preference){
     .rise{animation:rise .9s cubic-bezier(.22,.8,.3,1) both; animation-delay:calc(var(--d,0) * 110ms)}
@@ -553,6 +596,10 @@
       <div class="lamp-wrap" role="status" aria-label="Resident mind online">
         <span class="lamp" aria-hidden="true"></span>
         <span class="lamp-label">Resident Mind Online<span>Gate · Journal · Seam nominal</span></span>
+      </div>
+      <div class="hdr-controls">
+        <span class="aa-ind" id="aaInd" hidden><span class="aa-dot" aria-hidden="true"></span>Autoapprove</span>
+        <button class="kill-btn" id="killBtn" type="button" aria-label="Killswitch: halt the agent on this node">Kill</button>
       </div>
     </div>
   </header>
@@ -626,12 +673,13 @@
       </div>
     </section>
 
-    <!-- JOURNAL / ESCALATIONS — one shared panel, two tabs, real snapshot data -->
-    <section class="panel ledger-panel rise" style="--d:5" aria-label="Journal and escalations">
+    <!-- JOURNAL / ESCALATIONS / COMMANDS — one shared panel, three tabs, real snapshot data -->
+    <section class="panel ledger-panel rise" style="--d:5" aria-label="Journal, escalations and commands">
       <div class="tab-bar">
-        <div class="tabs" role="tablist" aria-label="Journal and escalations tabs">
+        <div class="tabs" role="tablist" aria-label="Journal, escalations and commands tabs">
           <button class="tab-btn is-active" type="button" role="tab" id="tab-journal" aria-selected="true" aria-controls="pane-journal" data-tab="journal">Journal</button>
           <button class="tab-btn" type="button" role="tab" id="tab-esc" aria-selected="false" aria-controls="pane-esc" data-tab="esc" tabindex="-1">Escalations<span class="tab-count">5 open</span></button>
+          <button class="tab-btn" type="button" role="tab" id="tab-cmd" aria-selected="false" aria-controls="pane-cmd" data-tab="cmd" tabindex="-1">Commands<span class="tab-count" id="cmdCount"></span></button>
         </div>
         <span class="tab-note" id="tabNote">si-seam.si · chain verified · tip seq 74 · snapshot 2026-11-21</span>
       </div>
@@ -663,6 +711,13 @@
               <div class="esc-row" role="button" tabindex="0" data-esc="se_0009" aria-label="Escalation se_0009, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0009 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 49 · task 43 · opened <span class="mono">2026-11-13T21:08:32Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
               <div class="esc-row" role="button" tabindex="0" data-esc="se_0010" aria-label="Escalation se_0010, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0010 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 54 · task 43 · opened <span class="mono">2026-11-13T21:08:32Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
               <div class="esc-row" role="button" tabindex="0" data-esc="se_0011" aria-label="Escalation se_0011, hearth.restart, imagine-v13, opened 2026-11-13. Show full detail."><div class="esc-main"><div class="esc-id">se_0011 <span>· hearth.restart</span></div><div class="esc-desc">imagine-v13 · intent seq 59 · task 43 · opened <span class="mono">2026-11-13T21:08:33Z</span></div></div><div class="esc-age"><strong>8d</strong><span>open</span></div><div class="esc-side"><span class="state-chip">Escalated</span><span class="esc-details">Details ›</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane" id="pane-cmd" role="tabpanel" aria-labelledby="tab-cmd">
+          <div class="esc-body">
+            <div class="esc-list cmd-list" aria-label="Command history: every tool intent in the seam journal. Select a command for full detail.">
+              <!-- Snapshot seed: the intents documented in this page's 2026-11-21 extract. Live mode replaces this with the journal's full command history. -->
             </div>
           </div>
         </div>
@@ -759,7 +814,8 @@
     var tabNote = document.getElementById('tabNote');
     var notes = {
       journal: 'si-seam.si · chain verified · tip seq 74 · snapshot 2026-11-21',
-      esc: 'Awaiting housekeeping · live journal'
+      esc: 'Awaiting housekeeping · live journal',
+      cmd: 'Every tool intent in the journal · the agent\u2019s command history'
     };
     function selectTab(name, focus){
       tabBtns.forEach(function(btn){
@@ -967,6 +1023,140 @@
       ];
     }
 
+    /* ---------- commands: the agent's action history ----------
+       Every tool intent in the seam journal, folded with its
+       outcome. The seed below is the 2026-11-21 snapshot extract
+       (the intents this page's data documents); live mode
+       replaces it with the full history from /api/commands. */
+    var COMMANDS = {};
+    (function seedCommands(){
+      Object.keys(ESCALATIONS).forEach(function(id){
+        var e = ESCALATIONS[id];
+        COMMANDS[id] = {
+          seq: e.intentSeq, id: id, taskSeq: e.taskSeq, ts: e.opened,
+          tsShort: e.opened.replace("T", " ").slice(0, 19) + "Z",
+          tool: "hearth.restart", model: e.model,
+          spineSeq: e.spineSeq, spineHash: e.spineHash,
+          reason: e.reason, verdict: "ESCALATE", effectiveClass: "external",
+          state: "escalated", resolution: null, resolutionSeq: null,
+          resolutionOperator: null, orderingKey: e.orderingKey,
+          entryHash: e.entryHash, prevHash: e.prevHash, gateReport: null,
+          outcome: { label: "not executed", detail: EXECUTION_NOTE, resultSeq: null },
+          results: []
+        };
+      });
+      COMMANDS["se_0012"] = {
+        seq: 64, id: "se_0012", taskSeq: 43, ts: "2026-11-13T21:08:34.092910Z",
+        tsShort: "2026-11-13 21:08:34Z",
+        tool: "hearth.restart", model: "imagine-v13",
+        spineSeq: 565, spineHash: "2fc5d2e72298199a2c9496a2a4098a35285bc708791793394abaa991cff2c5cb",
+        reason: "observed lost{evicted} at seq 565; causal chain: lost#565 <- resident#564 <- loading#563 <- declared#562",
+        verdict: "ESCALATE", effectiveClass: "external",
+        state: "refused-at-claim", resolution: "admit-after-review",
+        resolutionSeq: 69, resolutionOperator: "SI-114 ESC-LIVE-1 exercise coordinator (lead-dispatched)",
+        orderingKey: "hearth:imagine-v13",
+        entryHash: "", prevHash: "", gateReport: null,
+        outcome: { label: "refused", detail: "stale state: imagine-v13's latest spine event is resident at seq 597, not the lost event at seq 565 the intent answers; refusing to restart against state that has moved on", resultSeq: 73 },
+        results: []
+      };
+    })();
+
+    function verdictChip(v){
+      var cls = v === "ADMIT" ? "admit" : (v === "REJECT" ? "reject" : "escalate");
+      return '<span class="vchip ' + cls + '">' + esc(v || "") + '</span>';
+    }
+
+    function buildCmdRow(c){
+      var row = document.createElement('div');
+      row.className = 'esc-row cmd-row';
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.setAttribute('data-cmd', c.id);
+      row.setAttribute('aria-label', 'Command ' + c.id + ', ' + (c.tool || '') +
+        ', verdict ' + (c.verdict || '') + ', outcome ' + c.outcome.label +
+        '. Show full detail.');
+      row.innerHTML =
+        '<div class="esc-main"><div class="esc-id">' + esc(c.tool || '') +
+          ' <span>· ' + esc(c.id) + '</span></div>' +
+        '<div class="esc-desc">' + esc(c.model || '') + ' · intent seq ' +
+          esc(String(c.seq)) + ' · spine seq ' + esc(String(c.spineSeq)) +
+          ' · <span class="mono">' + esc(String(c.ts).slice(0, 19) + 'Z') +
+          '</span></div></div>' +
+        '<div class="cmd-outcome"><strong>' + esc(c.outcome.label) +
+          '</strong><span>outcome</span></div>' +
+        '<div class="esc-side">' + verdictChip(c.verdict) +
+          '<span class="esc-details">Details ›</span></div>';
+      return row;
+    }
+
+    function renderCmdSeed(){
+      var list = document.querySelector('.cmd-list');
+      if(!list) return;
+      list.innerHTML = '';
+      Object.keys(COMMANDS).map(function(k){ return COMMANDS[k]; })
+        .sort(function(a, b){ return a.seq - b.seq; })
+        .forEach(function(c){ list.appendChild(buildCmdRow(c)); });
+      wireRows('.cmd-row', 'data-cmd', openCommand);
+      var cc = document.getElementById('cmdCount');
+      if(cc) cc.textContent = Object.keys(COMMANDS).length + ' in extract';
+    }
+
+    function openCommand(id, trigger){
+      var c = COMMANDS[id];
+      if(!c) return;
+      modalKicker.textContent = 'Command · self_edits · si-seam.si';
+      var vCls = c.verdict === "ADMIT" ? "state" : (c.verdict === "REJECT" ? "reject" : "escalate");
+      modalTitle.innerHTML = esc(c.id) + ' <span class="chip ' + vCls + '">' +
+        esc(c.verdict || '') + '</span> <span class="chip kind">' + esc(c.state || '') + '</span>';
+      var facts = factGrid([
+        ["Tool", c.tool || "", "m"],
+        ["Model", c.model, "m"],
+        ["Intent seq", String(c.seq), "m"],
+        ["Task seq", String(c.taskSeq), "m"],
+        ["Effective class", c.effectiveClass || "", "m"],
+        ["Folded state", c.state || ""],
+        ["Resolution", c.resolution || "none", "m"],
+        ["Resolution seq", c.resolutionSeq === null || c.resolutionSeq === undefined ? "—" : String(c.resolutionSeq), "m"],
+        ["Resolution operator", c.resolutionOperator || "—"],
+        ["Journaled", c.ts, "m"],
+        ["Spine event seq", String(c.spineSeq), "m"],
+        ["Spine event hash", c.spineHash, "h"],
+        ["Ordering key", c.orderingKey, "m"]
+      ]);
+      var checks = checksFor(c).map(function(ch){
+        var out = '<div class="check"><div class="check-top"><span class="check-name">' + esc(ch.name) + '</span>' +
+          (ch.measured !== null ? '<span class="check-measured">measured ' + esc(ch.measured) + '</span>' : '') +
+          '<span class="mark ' + ch.mark + '">' + esc(ch.markLabel) + '</span></div>' +
+          '<div class="check-detail">' + esc(ch.detail) + '</div>';
+        if(ch.subchecks){
+          out += '<div class="subchecks">' + ch.subchecks.map(function(s){
+            var sPass = s[2] === undefined ? true : !!s[2];
+            return '<div class="subcheck"><span class="sn">' + esc(s[0]) + '</span><span class="sm">' + (sPass ? 'Pass' : 'Fail') + '</span><span class="sd">' + esc(s[1]) + '</span></div>';
+          }).join('') + '</div>';
+        }
+        return out + '</div>';
+      }).join('');
+      var resultsHtml = '';
+      (c.results || []).forEach(function(r){
+        resultsHtml += '<p class="modal-sec">Tool result · seq ' + esc(String(r.seq)) +
+          ' · ' + esc(r.ts) + '</p><div class="kv-list">' +
+          r.fields.map(kvRow).join('') + '</div>';
+      });
+      modalBody.innerHTML =
+        '<p class="modal-sec">Facts</p>' + facts +
+        '<p class="modal-sec">Reason</p><div class="prose">' + esc(c.reason) + '</div>' +
+        '<p class="modal-sec">Outcome — ' + esc(c.outcome.label) + '</p>' +
+        '<div class="prose">' + esc(c.outcome.detail) + '</div>' +
+        resultsHtml +
+        '<p class="modal-sec">Gate report — verdict ' + esc(c.verdict || '') + '</p>' +
+        '<div class="check-list">' + checks + '</div>' +
+        (c.entryHash ? '<p class="modal-sec">Chain</p><div class="kv-list">' +
+          kvRow(["Entry hash", c.entryHash, "h"]) +
+          kvRow(["Prev hash", c.prevHash, "h"]) + '</div>' : '');
+      modalFoot.innerHTML = '<span class="foot-note">The journal is the command history — every intent the gate priced, admitted or not</span>';
+      openModal(trigger);
+    }
+
     /* ---------- modal rendering ---------- */
     function esc(s){
       return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -1110,9 +1300,68 @@
         '</div>';
       modalFoot.innerHTML =
         '<span class="foot-note">Not wired to the runtime</span>' +
-        '<span class="btns"><button class="mbtn" type="button" aria-label="Refuse ' + esc(id) + '">Refuse</button>' +
-        '<button class="mbtn approve" type="button" aria-label="Approve ' + esc(id) + '">Approve</button></span>';
+        '<span class="btns"><button class="mbtn" type="button" data-resolve="reject" aria-label="Refuse ' + esc(id) + '">Refuse</button>' +
+        '<button class="mbtn approve" type="button" data-resolve="admit-after-review" aria-label="Approve ' + esc(id) + '">Approve</button></span>';
       openModal(trigger);
+      if(consoleLive){
+        var note = modalFoot.querySelector('.foot-note');
+        note.textContent = 'Resolutions journal via SI-92 — the gate verdict is never rewritten';
+        wireResolve(id, note,
+          modalFoot.querySelector('[data-resolve="reject"]'),
+          modalFoot.querySelector('[data-resolve="admit-after-review"]'));
+      }
+    }
+
+    // Approve / Refuse: a two-click operator act. First click arms
+    // (the button names the exact resolution it will journal);
+    // second click POSTs /api/resolve. The server performs the
+    // SI-92 verifying act; a refusal comes back as the SI layer's
+    // own message and is shown verbatim.
+    function wireResolve(id, note, refuseBtn, approveBtn){
+      var armed = null;
+      var busy = false;
+      function disarm(){
+        armed = null;
+        refuseBtn.classList.remove('confirm');
+        approveBtn.classList.remove('confirm');
+        refuseBtn.textContent = 'Refuse';
+        approveBtn.textContent = 'Approve';
+      }
+      function onClick(btn, resolution, verb){
+        if(busy) return;
+        if(armed !== resolution){
+          disarm();
+          armed = resolution;
+          btn.classList.add('confirm');
+          btn.textContent = 'Confirm ' + verb.toLowerCase();
+          note.classList.remove('resolve-err');
+          note.textContent = 'Confirm: journal ' + resolution + ' for ' + id +
+            '? A separate operator act — the ESCALATE verdict stands.';
+          return;
+        }
+        busy = true;
+        refuseBtn.disabled = true;
+        approveBtn.disabled = true;
+        note.textContent = 'Journaling ' + resolution + ' for ' + id + '…';
+        postJson('/api/resolve', {edit_id: id, resolution: resolution})
+          .then(function(doc){
+            note.textContent = 'Resolved: ' + doc.resolution +
+              ' journaled at seq ' + doc.resolution_seq +
+              ' · operator ' + doc.operator;
+            refreshLive();
+            setTimeout(closeModal, 1000);
+          })
+          .catch(function(err){
+            busy = false;
+            refuseBtn.disabled = false;
+            approveBtn.disabled = false;
+            disarm();
+            note.classList.add('resolve-err');
+            note.textContent = 'Refused by the journal: ' + err.message;
+          });
+      }
+      refuseBtn.addEventListener('click', function(){ onClick(refuseBtn, 'reject', 'Reject'); });
+      approveBtn.addEventListener('click', function(){ onClick(approveBtn, 'admit-after-review', 'Approve'); });
     }
 
     // Rows open their detail modal (click, Enter, or Space).
@@ -1135,6 +1384,7 @@
        SNAPSHOT. The snapshot is a fallback, never a disguise.
        ================================================================ */
     var modeTag = document.getElementById('modeTag');
+    var consoleLive = false;
 
     function fetchJson(url, timeoutMs){
       var ctrl = new AbortController();
@@ -1144,6 +1394,23 @@
         if(!resp.ok) throw new Error(url + ' answered ' + resp.status);
         return resp.json();
       });
+    }
+
+    function postJson(url, payload){
+      return fetch(url, {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)}).then(function(resp){
+          return resp.json().then(function(doc){
+            if(!resp.ok) throw new Error(doc.error || (url + ' answered ' + resp.status));
+            return doc;
+          });
+        });
+    }
+
+    function refreshLive(){
+      fetchJson('/api/journal', 15000).then(renderJournal).catch(function(){});
+      fetchJson('/api/escalations', 15000).then(renderEscalations).catch(function(){});
+      fetchJson('/api/commands', 15000).then(renderCommands).catch(function(){});
     }
 
     function ageDays(iso){
@@ -1258,6 +1525,117 @@
       }
     }
 
+    function renderCommands(doc){
+      COMMANDS = {};
+      var list = document.querySelector('.cmd-list');
+      if(!list) return;
+      list.innerHTML = '';
+      doc.commands.forEach(function(c){
+        COMMANDS[c.id] = c;
+        list.appendChild(buildCmdRow(c));
+      });
+      wireRows('.cmd-row', 'data-cmd', openCommand);
+      var cc = document.getElementById('cmdCount');
+      if(cc) cc.textContent = doc.count + ' total';
+      notes.cmd = 'Every tool intent in the journal · live · ' + doc.count + ' commands';
+      var active = document.querySelector('.tab-btn.is-active');
+      if(active && active.getAttribute('data-tab') === 'cmd' && tabNote){
+        tabNote.textContent = notes.cmd;
+      }
+    }
+
+    /* ---------- operator controls: autoapprove + killswitch ---------- */
+    var aaInd = document.getElementById('aaInd');
+    var killBtn = document.getElementById('killBtn');
+
+    function renderConfig(cfg){
+      if(aaInd) aaInd.hidden = !cfg.autoapprove_active;
+    }
+    fetchJson('/api/config', 8000).then(renderConfig).catch(function(){});
+
+    function markNodeHalted(){
+      var wrap = document.querySelector('.lamp-wrap');
+      if(wrap){
+        wrap.classList.add('halted');
+        var lbl = wrap.querySelector('.lamp-label');
+        if(lbl && lbl.childNodes.length) lbl.childNodes[0].textContent = 'Resident Mind Halted';
+      }
+      if(modeTag) modeTag.textContent = 'NODE HALTED · killswitch';
+      if(aaInd) aaInd.hidden = true;
+    }
+
+    function openKillReport(rep, trigger){
+      modalKicker.textContent = rep.dry_run ? 'Killswitch · dry run' : 'Killswitch';
+      modalTitle.innerHTML = '<span class="plain">' +
+        (rep.dry_run ? 'Nothing was stopped' : 'Node halted') + '</span>';
+      var rows = [];
+      if(rep.dry_run){
+        rows.push(["Autoapprove", rep.would_disable_autoapprove ? "on — would be disabled" : "already off", "m"]);
+        (rep.would_stop_units || []).forEach(function(u){
+          rows.push(["Would stop", u.unit + " — now " + u.active + " / " + u.enabled, "m"]);
+        });
+        (rep.ports_now || []).forEach(function(p){
+          rows.push(["Port " + p.port, p.listening ? "listening now" : "not listening", "m"]);
+        });
+      } else {
+        rows.push(["Autoapprove", rep.autoapprove_disabled ? "disabled" : "unchanged", "m"]);
+        (rep.stopped_units || []).forEach(function(u){
+          rows.push(["Unit", u.unit + " — " + u.active + " / " + u.enabled, "m"]);
+        });
+        (rep.stop_errors || []).forEach(function(e){
+          rows.push(["Stop error", e.unit + ": " + e.error, "l"]);
+        });
+        (rep.ports_after || []).forEach(function(p){
+          rows.push(["Port " + p.port, p.listening ? "STILL LISTENING" : "closed", "m"]);
+        });
+        rows.push(["Node down (verified)", rep.node_down ? "yes" : "no", "m"]);
+        rows.push(["At", rep.at || "", "m"]);
+      }
+      modalBody.innerHTML =
+        '<p class="modal-sec">' + (rep.dry_run ? 'What a kill would do — nothing was changed (GAIA_KILL_DRY_RUN=1)' : 'Verified post-state') + '</p>' +
+        '<div class="kv-list">' + rows.map(kvRow).join('') + '</div>' +
+        '<p class="modal-sec">Watchdog limit</p><div class="prose">' + esc(rep.watchdog_note || '') + '</div>';
+      modalFoot.innerHTML = '<span class="foot-note">' +
+        (rep.dry_run ? 'Dry run — the node is untouched' : 'Revival: systemctl start gaia-node.service si-seam-service.service — or the watchdog does it') + '</span>';
+      openModal(trigger);
+    }
+
+    if(killBtn){
+      var killArmTimer = null;
+      killBtn.addEventListener('click', function(){
+        if(killBtn.disabled) return;
+        if(!killBtn.classList.contains('armed')){
+          killBtn.classList.add('armed');
+          killBtn.textContent = 'Confirm kill';
+          killArmTimer = setTimeout(function(){
+            killBtn.classList.remove('armed');
+            killBtn.textContent = 'Kill';
+          }, 4000);
+          return;
+        }
+        clearTimeout(killArmTimer);
+        killBtn.disabled = true;
+        killBtn.textContent = 'Killing…';
+        postJson('/api/kill', {}).then(function(rep){
+          killBtn.disabled = false;
+          killBtn.classList.remove('armed');
+          killBtn.textContent = 'Kill';
+          if(!rep.dry_run) markNodeHalted();
+          openKillReport(rep, killBtn);
+          fetchJson('/api/config', 8000).then(renderConfig).catch(function(){});
+        }).catch(function(err){
+          killBtn.disabled = false;
+          killBtn.classList.remove('armed');
+          killBtn.textContent = 'Kill';
+          modalKicker.textContent = 'Killswitch';
+          modalTitle.innerHTML = '<span class="plain">Kill failed</span>';
+          modalBody.innerHTML = '<div class="prose">' + esc(err.message) + '</div>';
+          modalFoot.innerHTML = '<span class="foot-note">The node was not stopped by this attempt</span>';
+          openModal(killBtn);
+        });
+      });
+    }
+
     function markChatLive(){
       var chatMode = document.getElementById('chatMode');
       if(chatMode) chatMode.textContent = 'Live · resident model';
@@ -1267,8 +1645,11 @@
       if(note) note.textContent = 'Live — messages go to the resident model (Imagine v13) on this node.';
     }
 
+    renderCmdSeed();
+
     var journalP = fetchJson('/api/journal', 15000);
     var escP = fetchJson('/api/escalations', 15000);
+    var cmdP = fetchJson('/api/commands', 15000);
     var spineP = fetchJson('/api/spine', 25000);
 
     Promise.allSettled([journalP, escP]).then(function(results){
@@ -1277,12 +1658,14 @@
       if(jOk) renderJournal(results[0].value);
       if(eOk) renderEscalations(results[1].value);
       if(jOk && eOk){
+        consoleLive = true;
         if(modeTag) modeTag.textContent = 'LIVE · wired to this node';
         markChatLive();
       } else if(modeTag){
         modeTag.textContent = 'SNAPSHOT · console APIs unreachable — showing the 2026-11-21 snapshot';
       }
     });
+    cmdP.then(function(doc){ renderCommands(doc); }).catch(function(){ /* seed rows stay */ });
     spineP.then(function(doc){ renderSpine(doc); }).catch(function(){ /* snapshot strip stays */ });
   })();
 </script>
